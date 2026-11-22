@@ -46,14 +46,14 @@ Use your browser's existing settings. If an available control can open the picke
 | `get_rules_version` | Rules text, testing requirements and safe harbour status for a specific version |
 | `list_payouts` | Personal payout amounts, currencies, statuses and dates |
 | `get_inbox_counts` | Live inbox totals for all statuses or just the ones you ask about, such as Pending, Triage and Draft |
-| `get_inbox_reports` | Inbox row metadata for an exact title or submission reference, or a list of reports in one status |
+| `get_inbox_reports` | Current report status by title or submission reference, or a list of reports in one status |
 | `prepare_report_draft` | A local report package or a browser handoff that Codex carries out using its built-in controls |
 
 For paginated API lookups, continue from `nextOffset` until it is `null`. A filtered page can be empty and still have a continuation.
 
 ## Check your inbox
 
-Sign in to Intigriti in your browser and ask Codex in ordinary language:
+Look up a report’s current status by title, or get counts for Pending, Triage, Draft and other inbox states. Sign in to Intigriti in your browser and ask Codex in ordinary language:
 
 > How many reports are pending or in triage? How many are drafts?
 
