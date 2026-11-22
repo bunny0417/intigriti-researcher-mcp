@@ -151,10 +151,23 @@ test("actual stdio entry point lists the tool catalog and explains missing crede
   await client.connect(transport);
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(tool => tool.name).sort(), [
-    "get_program", "get_rules_version", "get_scope_version", "list_payouts", "list_program_activity", "list_programs", "prepare_report_draft",
+    "get_inbox_counts", "get_inbox_reports", "get_program", "get_rules_version", "get_scope_version", "list_payouts", "list_program_activity", "list_programs", "prepare_report_draft",
   ]);
   assert.ok(tools.filter(tool => tool.name !== "prepare_report_draft").every(tool => tool.annotations.readOnlyHint));
   assert.equal(tools.find(tool => tool.name === "prepare_report_draft").annotations.readOnlyHint, false);
+  // Empty tuples serialize to invalid draft-07 "items: []" and strict clients can drop these tools.
+  for (const tool of tools.filter(tool => tool.name.startsWith("get_inbox_"))) {
+    for (const [key, schema] of Object.entries(tool.inputSchema.properties).filter(([key]) => key.endsWith("Observation"))) {
+      const filters = schema.properties.scope.properties.otherFilters;
+      assert.equal(filters.maxItems, 0, key);
+      assert.equal(filters.items.type, "string", key);
+    }
+  }
+  for (const [name, args] of [["get_inbox_counts", { statuses: ["Pending", "Triage"] }], ["get_inbox_reports", { report: "Example reference" }]]) {
+    const inbox = await client.callTool({ name, arguments: args });
+    assert.equal(inbox.structuredContent.status, "awaiting_inbox_read");
+    assert.equal(inbox.structuredContent.openUrl, "https://app.intigriti.com/researcher/inbox");
+  }
   const result = await client.callTool({ name: "list_programs", arguments: {} });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /INTIGRITI_API_TOKEN/);

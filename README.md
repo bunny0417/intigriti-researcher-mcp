@@ -2,7 +2,7 @@
 
 ![An AI brain controls a robotic MCP arm holding a program record](banner.png)
 
-**v1.1.1 · Codex only.** Browse Intigriti programs, compare rules and scope changes, check payouts, and prepare researcher report drafts.
+**v1.2.0 · Codex only.** Check your inbox status counts, look up a report, browse programs, compare rules and scope changes, check payouts, and prepare researcher report drafts.
 
 **Before saving or uploading to Intigriti, sign in and approve the destination, fields and exact files in chat.** Codex uses its connected **@Chrome** control in your signed-in browser, with **@Computer** as a fallback where available. You handle sign-in and 2FA in that browser. You control final review and submission.
 
@@ -45,9 +45,29 @@ Use your browser's existing settings. If an available control can open the picke
 | `get_scope_version` | Scope counts for a specific version |
 | `get_rules_version` | Rules text, testing requirements and safe harbour status for a specific version |
 | `list_payouts` | Personal payout amounts, currencies, statuses and dates |
+| `get_inbox_counts` | Live inbox totals for all statuses or just the ones you ask about, such as Pending, Triage and Draft |
+| `get_inbox_reports` | Inbox row metadata for an exact title or submission reference, or a list of reports in one status |
 | `prepare_report_draft` | A local report package or a browser handoff that Codex carries out using its built-in controls |
 
-For a complete list, continue from `nextOffset` until it is `null`. A filtered page can be empty and still have a continuation.
+For paginated API lookups, continue from `nextOffset` until it is `null`. A filtered page can be empty and still have a continuation.
+
+## Check your inbox
+
+Sign in to Intigriti in your browser and ask Codex in ordinary language:
+
+> How many reports are pending or in triage? How many are drafts?
+
+> Which of my reports are pending? Show me the first five titles.
+
+> What is the status of my report titled “My practice report”?
+
+If a chat says the connector has no inbox feature, check that Codex has connected to this checkout and start a fresh project chat. A tool run for counts uses `get_inbox_counts`; a title check uses `get_inbox_reports`. Each reads the browser result back into the same tool before answering. A browser-only answer does not verify the MCP connection.
+
+Codex uses the connected Chrome or Computer control to read the **inbox list**. This workflow needs no PAT or draft approval. For counts, it clears the search and filters in a separate tab, reads the portal's “X of Y items shown” counter, then checks one status filter at a time. **Open** includes **Triage** and **Pending**. **Closed / Archived** includes several outcomes. The displayed inbox total is the denominator. Adding group counts to their child counts would double-count reports.
+
+For a report lookup, Codex uses the list search and leaves every result unopened. It can show the title, status and number of matching results. A submission date or latest comment preview is returned only when explicitly labeled on the list. The observed row timestamp was **last updated**, and the inspected row had no comment preview. Missing fields are reported as unavailable. Report bodies, attachments and message histories stay outside the lookup. The MCP validates the browser's observations in memory; it keeps no inbox history. Metadata used to answer your question enters the Codex chat.
+
+**How we checked this.** In a fresh Codex chat we asked for Pending and Triage counts, then for the status of one report by title. The tool trace showed a separate inbox tab, status filters, a list search and a readback to the MCP for each answer. No report detail page was opened. Automated tests cover grouped statuses, zero results, changed totals, duplicate titles, incomplete searches and the fields allowed in a result.
 
 ## Draft a report
 

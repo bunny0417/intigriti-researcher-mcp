@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const names = [
-  "get_program", "get_rules_version", "get_scope_version",
+  "get_inbox_counts", "get_inbox_reports", "get_program", "get_rules_version", "get_scope_version",
   "list_payouts", "list_program_activity", "list_programs", "prepare_report_draft",
 ];
 const entry = fileURLToPath(new URL("../src/index.js", import.meta.url));
