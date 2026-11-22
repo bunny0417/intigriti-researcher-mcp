@@ -1,6 +1,6 @@
 // Offline native-handoff contract checks through the shipped MCP stdio entry point.
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, stat, truncate, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, truncate, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,6 +14,7 @@ const programUrl = "https://app.intigriti.com/programs/fixture/example/detail";
 const draftRoute = "/submissions/draft/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002/create";
 const draftUrl = "https://app.intigriti.com/researcher" + draftRoute;
 const draftAlias = "https://app.intigriti.com/researcher/inbox" + draftRoute;
+const deferredEvidence = "deferred-intake-evidence.txt";
 const samplePng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jM1cAAAAASUVORK5CYII=",
   "base64",
@@ -42,6 +43,37 @@ function unpack(response) {
   assert.ok(!response.isError, response.content[0]?.text);
   assert.deepEqual(JSON.parse(response.content[0].text), response.structuredContent);
   return response.structuredContent;
+}
+
+function checkIntake(result, status) {
+  assert.equal(result.status, status);
+  assert.match(result.message, /authenticat|sign(?:ed)?[ -]in/i);
+  assert.match(result.question, /\?/);
+  assert.ok(Array.isArray(result.instructions) && result.instructions.length > 0);
+  for (const key of ["draftPath", "draftId", "approvalId", "hostTools", "attachments", "evidence"]) {
+    assert.ok(!Object.hasOwn(result, key), `Intake unexpectedly produced ${key}`);
+  }
+}
+
+async function checkProgramIntake(invoke, profile) {
+  const before = (await readdir(profile)).sort();
+  const first = unpack(await invoke({}));
+  checkIntake(first, "awaiting_program");
+  assert.match(first.question, /program/i);
+  const programOnly = unpack(await invoke({ programUrl: "https://app.intigriti.com/researcher/programs/fixture/example" }));
+  checkIntake(programOnly, "awaiting_finding");
+  assert.equal(programOnly.programUrl, programUrl);
+  const directions = programOnly.instructions.join(" ");
+  assert.match(directions, /existing|verified|already/i);
+  assert.match(directions, /notes/i);
+  assert.match(directions, /PoC|proof.of.concept/i);
+  const existing = unpack(await invoke({ draftUrl: draftAlias + "?program=fixture%2Fexample" }));
+  checkIntake(existing, "awaiting_finding");
+  assert.equal(existing.draftUrl, draftAlias);
+  const deferred = unpack(await invoke({ programUrl, attachments: [path.join(profile, deferredEvidence)] }));
+  checkIntake(deferred, "awaiting_finding");
+  await reject(invoke, { programUrl: "https://example.invalid/programs/fixture/example/detail" });
+  assert.deepEqual((await readdir(profile)).sort(), before, "Intake created a snapshot or inspected deferred evidence");
 }
 
 function checkReview(review, draft) {
@@ -165,6 +197,7 @@ async function runRound(round, root, guard) {
   let snapshot;
   let firstApproval;
   await withServer(profile, guard, async invoke => {
+    await checkProgramIntake(invoke, profile);
     const call = args => invoke({ mode: "local", ...args });
     if (round % 2 === 0) {
       const initial = unpack(await invoke(args));
@@ -244,11 +277,23 @@ async function main() {
       '  if (path.basename(name) === ".env") throw new Error("Token file disabled in local draft acceptance");',
       '  return read(file, ...args);',
       '};',
+      // Record even swallowed attempts to inspect a file supplied before a finding.
+      `const deferred = path.join(process.cwd(), ${JSON.stringify(deferredEvidence)});`,
+      'for (const method of ["access", "lstat", "stat", "open", "readFile", "realpath"]) {',
+      '  const original = fs.promises[method];',
+      '  fs.promises[method] = (file, ...args) => {',
+      '    if (file === deferred) {',
+      '      fs.writeFileSync("unexpected-intake-inspection", method);',
+      '      throw new Error("Intake inspected a deferred attachment");',
+      '    }',
+      '    return original.call(fs.promises, file, ...args);',
+      '  };',
+      '}',
       'syncBuiltinESMExports();',
     ].join("\n"));
     for (let round = 1; round <= rounds; round++) {
       await runRound(round, root, pathToFileURL(guard).href);
-      console.log(`Round ${round}/${rounds} passed: offline draft persistence and native Codex handoff contract.`);
+      console.log(`Round ${round}/${rounds} passed: program-first intake, draft persistence and native Codex handoff.`);
     }
   } finally {
     await rm(root, { recursive: true, force: true });

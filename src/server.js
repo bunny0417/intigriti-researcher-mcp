@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { z } from "zod";
 import { ClientError } from "./client.js";
 import { prepareReportDraft, reportDraftShape, ReportDraftError } from "./report-draft.js";
-import { createNativeDraftHandoff, NativeHandoffError, nativeReceiptSchema } from "./draft-handoff.js";
+import { createNativeDraftHandoff, draftIntake, NativeHandoffError, nativeReceiptSchema } from "./draft-handoff.js";
 import {
   activityRecord, isVisible, payoutRecord, programCard, programDetail,
   rulesVersion, scopeVersion, ViewError,
@@ -119,7 +119,7 @@ export function createServer(client, allowedIds = new Set()) {
 
   const handoff = createNativeDraftHandoff();
   tool("prepare_report_draft",
-    "Warn first: sign in to Intigriti and approve this specific draft and evidence list. Only the researcher submits. Prepare from a programUrl or existing draftUrl, title and description. After explicit approval, call approve with draftId and approvalId. Perform the returned procedure using @Chrome or @Computer. Local mode prepares/resumes, or binds the observed draftUrl. Finish records a verified browser receipt only.",
+    "Start with {} to ask which program to draft for, or use the program or existing draft link already supplied. Warn first: sign in to Intigriti and approve the specific draft and evidence list. Draft from an existing verified finding or user-selected notes and PoC files. Only the researcher submits. After explicit approval, call approve with draftId and approvalId, then use @Chrome or @Computer. Local mode prepares/resumes/binds. Finish records a browser-observed outcome only.",
     { ...reportDraftShape, mode: z.enum(["browser", "local", "approve", "finish", "status", "cancel"]).default("browser"),
       approvalId: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), receipt: nativeReceiptSchema.optional() },
     async ({ mode, approvalId, receipt, ...args }) => {
@@ -137,6 +137,8 @@ export function createServer(client, allowedIds = new Set()) {
         const draft = await prepareReportDraft(args);
         return mode === "approve" ? handoff.approve(draft, approvalId) : handoff.finish(draft, receipt);
       }
+      const intake = draftIntake(args);
+      if (intake) return intake;
       const draft = await prepareReportDraft(args);
       return mode === "local" ? draft : handoff.start(draft);
     }, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });

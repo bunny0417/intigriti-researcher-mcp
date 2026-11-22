@@ -45,9 +45,9 @@ For a complete list, continue from `nextOffset` until it is `null`. A filtered p
 
 ## Draft a report
 
-1. Give Codex the program or existing draft link, your verified findings, and the absolute paths of any files you want to attach. Include how AI helped prepare the report.
+1. Say **“Draft an Intigriti report.”** Codex asks which program you want. Paste the program link or an existing draft link.
 
-   > Prepare a draft for this program using my notes. Show me the destination, fields, and screenshot you plan to upload before saving it.
+   Codex drafts from the verified finding you already discussed. Otherwise, point it to your finding notes and PoC files. If several findings fit, choose one. Include how AI helped prepare the report.
 
 2. Sign in and give explicit permission for that draft and its listed files. Codex then opens the program’s **Create submission** page or reopens the identified draft. The same program can reopen an existing draft, so Codex checks its identity before entering text.
 3. Codex fills the approved fields, uploads selected evidence, and reopens the draft to check the saved fields and attachment rows. Its handoff distinguishes verified changes from anything still pending. Open the returned draft link for final review and submit it yourself when ready.
