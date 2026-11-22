@@ -6,7 +6,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const names = [
   "get_program", "get_rules_version", "get_scope_version",
-  "list_payouts", "list_program_activity", "list_programs",
+  "list_payouts", "list_program_activity", "list_programs", "prepare_report_draft",
 ];
 const entry = fileURLToPath(new URL("../src/index.js", import.meta.url));
 const rounds = 10;
@@ -129,7 +129,7 @@ try {
       await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry], env }));
       const { tools } = await client.listTools();
       check(isDeepStrictEqual(tools.map(t => t.name).sort(), names), "Unexpected tool catalog");
-      check(tools.every(t => t.annotations?.readOnlyHint === true), "Missing read-only annotation");
+      check(tools.filter(t => t.name !== "prepare_report_draft").every(t => t.annotations?.readOnlyHint === true), "Missing read-only annotation");
       samples ??= await selectPrograms(client);
       await runRound(client, round, samples);
       console.log(`Round ${round}/${rounds} passed: fresh stdio connection and all six live tools.`);

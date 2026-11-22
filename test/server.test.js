@@ -151,9 +151,10 @@ test("actual stdio entry point lists the tool catalog and explains missing crede
   await client.connect(transport);
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(tool => tool.name).sort(), [
-    "get_program", "get_rules_version", "get_scope_version", "list_payouts", "list_program_activity", "list_programs",
+    "get_program", "get_rules_version", "get_scope_version", "list_payouts", "list_program_activity", "list_programs", "prepare_report_draft",
   ]);
-  assert.ok(tools.every(tool => tool.annotations.readOnlyHint));
+  assert.ok(tools.filter(tool => tool.name !== "prepare_report_draft").every(tool => tool.annotations.readOnlyHint));
+  assert.equal(tools.find(tool => tool.name === "prepare_report_draft").annotations.readOnlyHint, false);
   const result = await client.callTool({ name: "list_programs", arguments: {} });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /INTIGRITI_API_TOKEN/);
