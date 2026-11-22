@@ -1,6 +1,6 @@
 # Intigriti Researcher MCP
 
-![An AI brain controls a robotic MCP arm holding a program record](banner.png)
+![Intigriti Researcher MCP for Codex. Programs cover scope, rules and activity. Inbox shows report status and counts for Pending, Triage, Draft and more. Drafts attach evidence for you to submit. Payouts show amounts and payment status. An AI brain controls a robotic MCP arm.](banner.png)
 
 **v1.2.0 · Codex only.** Check your inbox status counts, look up a report, browse programs, compare rules and scope changes, check payouts, and prepare researcher report drafts.
 
