@@ -1,0 +1,19 @@
+{
+  "name": "intigriti-researcher-mcp",
+  "version": "1.0.0",
+  "license": "MIT",
+  "private": true,
+  "description": "Local Intigriti researcher tools for Codex",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/index.js",
+    "setup:codex": "node scripts/setup-codex.js",
+    "test": "node --test",
+    "test:live": "node scripts/live-acceptance.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  }
+}

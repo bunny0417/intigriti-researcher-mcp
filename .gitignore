@@ -1,0 +1,5 @@
+node_modules/
+.codex/config.toml
+.env
+.env.*
+npm-debug.log*
