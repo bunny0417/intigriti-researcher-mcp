@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const directory = path.join(root, ".codex");
 const destination = path.join(directory, "config.toml");
+const nextStep = 'Open a new chat in this Codex project and say "Help me make a practice report on Intigriti." Drafting uses your browser sign-in.';
 const section = [
   "[mcp_servers.intigriti]",
   `command = ${JSON.stringify(process.execPath)}`,
@@ -35,6 +36,7 @@ async function setup() {
       const existing = (await readFile(destination, "utf8")).replace(/\r\n/g, "\n");
       if (("\n" + existing + "\n").includes("\n" + section + "\n")) {
         console.log(`Intigriti is already configured in ${destination}`);
+        console.log(nextStep);
         return;
       }
       console.error(
@@ -46,6 +48,7 @@ async function setup() {
       return;
     }
     console.log(`Configured Intigriti for Codex in ${destination}`);
+    console.log(nextStep);
   } finally {
     await unlink(temp);
   }

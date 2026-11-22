@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { prepareReportDraft, ReportDraftError } from "../src/report-draft.js";
+import { bindReportDraft, prepareReportDraft, readDraftForReceipt, ReportDraftError } from "../src/report-draft.js";
 
 const programUrl = "https://app.intigriti.com/programs/example/demo/detail";
 const draftUrl = "https://app.intigriti.com/researcher/inbox/submissions/draft/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002/create";
@@ -16,7 +16,9 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = path.join(root, "local-store");
   const prepare = args => prepareReportDraft(args, { directory });
-  return { root, directory, prepare };
+  const bind = (id, links) => bindReportDraft(id, links, { directory });
+  const forReceipt = id => readDraftForReceipt(id, { directory });
+  return { root, directory, prepare, bind, forReceipt };
 }
 
 test("prepares and resumes a private immutable snapshot, keeping notes separate from attachment metadata", async t => {
@@ -49,7 +51,7 @@ test("prepares and resumes a private immutable snapshot, keeping notes separate 
 });
 
 test("canonical program and observed draft links are strictly validated before any write", async t => {
-  const { directory, prepare } = await fixture(t);
+  const { directory, prepare, bind } = await fixture(t);
   const wrong = [
     programUrl + "?token=private", programUrl + "#draft", programUrl + "\n",
     programUrl.replace("https:", "http:"), programUrl.replace("app.", "user@app."),
@@ -66,8 +68,46 @@ test("canonical program and observed draft links are strictly validated before a
   assert.ok(!Object.hasOwn(saved, "programUrl"));
   assert.equal(saved.draftUrl, alias);
   assert.deepEqual(saved.missingFields, ["asset", "vulnerabilityType", "severity", "impact"]);
-  assert.equal((await prepare({ draftId: saved.draftId, draftUrl })).draftUrl, alias);
-  await assert.rejects(prepare({ draftId: saved.draftId, draftUrl: other }), /different platform draft/);
+  assert.equal((await bind(saved.draftId, { draftUrl })).draftUrl, alias);
+  await assert.rejects(bind(saved.draftId, { draftUrl: other }), /different platform draft/);
+});
+
+test("picker metadata changes preserve approval, while same-size edits and replacement files invalidate it", async t => {
+  const { root, prepare } = await fixture(t);
+  const evidence = path.join(root, "synthetic-evidence.txt");
+  const stamp = new Date("2025-01-01T00:00:00Z");
+  await writeFile(evidence, "sample A");
+  await utimes(evidence, stamp, stamp);
+  const draft = await prepare({ ...note, attachments: [evidence] });
+  const { ctimeNs: initialChange } = await lstat(evidence, { bigint: true });
+  // The Windows picker modified the file's change time while keeping its last write time.
+  await chmod(evidence, 0o444);
+  await chmod(evidence, 0o600);
+  assert.notEqual((await lstat(evidence, { bigint: true })).ctimeNs, initialChange);
+  assert.deepEqual(await prepare({ draftId: draft.draftId }), draft);
+
+  await writeFile(evidence, "sample B");
+  await utimes(evidence, stamp, stamp);
+  await assert.rejects(prepare({ draftId: draft.draftId }), /Attachment 1:.*changed/i);
+
+  await rename(evidence, path.join(root, "previous.txt"));
+  await writeFile(evidence, "sample A");
+  await utimes(evidence, stamp, stamp);
+  await assert.rejects(prepare({ draftId: draft.draftId }), /Attachment 1:.*changed/i);
+});
+
+test("legacy evidence without a digest resumes only while all original metadata matches", async t => {
+  const { root, prepare } = await fixture(t);
+  const evidence = path.join(root, "legacy.txt");
+  await writeFile(evidence, "fixture");
+  const saved = await prepare({ ...note, attachments: [evidence] });
+  const snapshot = JSON.parse(await readFile(saved.draftPath, "utf8"));
+  delete snapshot.attachments[0].sha256;
+  await writeFile(saved.draftPath, JSON.stringify(snapshot));
+  assert.deepEqual(await prepare({ draftId: saved.draftId }), saved);
+  await chmod(evidence, 0o444);
+  await chmod(evidence, 0o600);
+  await assert.rejects(prepare({ draftId: saved.draftId }), /attachment changed/i);
 });
 
 test("program URL variants from the read tools normalize to one detail URL and resume by UUID", async t => {
@@ -97,19 +137,21 @@ test("validates UTF-16 form and combined disclosure limits, resume exclusivity a
     { draftId: state.draftId, attachments: [] }, { draftId: state.draftId, severity: "low" },
     { ...note, questions: [{ question: "Q" }] }, { ...note, send: true },
   ]) await assert.rejects(prepare(args), ReportDraftError);
-  await assert.rejects(prepare({ draftId: "00000000-0000-4000-8000-000000000003" }), /not found/);
+  await assert.rejects(prepare({ draftId: "00000000-0000-4000-8000-000000000003" }), {
+    name: "ReportDraftError", code: "draft_not_found", message: "Local draft snapshot was not found.",
+  });
 });
 
 test("accepts only the inbox's program filter and strips it on creation, binding and resume", async t => {
-  const { directory, prepare } = await fixture(t);
+  const { directory, prepare, bind } = await fixture(t);
   const filter = "?program=example-co%2Fmy_program";
   const direct = await prepare({ ...note, draftUrl: alias + filter });
   assert.equal(direct.draftUrl, alias);
   assert.equal((await prepare({ draftId: direct.draftId })).draftUrl, alias);
-  assert.equal((await prepare({ draftId: direct.draftId, draftUrl: draftUrl + filter })).draftUrl, alias);
+  assert.equal((await bind(direct.draftId, { programUrl, draftUrl: draftUrl + filter })).draftUrl, alias);
   const saved = await prepare(note);
-  assert.equal((await prepare({ draftId: saved.draftId, draftUrl: draftUrl + filter })).draftUrl, draftUrl);
-  assert.equal((await prepare({ draftId: saved.draftId, draftUrl: alias + "?program=example-co/my_program" })).draftUrl, draftUrl);
+  assert.equal((await bind(saved.draftId, { programUrl, draftUrl: draftUrl + filter })).draftUrl, draftUrl);
+  assert.equal((await bind(saved.draftId, { programUrl, draftUrl: alias + "?program=example-co/my_program" })).draftUrl, draftUrl);
   assert.equal((await prepare({ draftId: saved.draftId })).draftUrl, draftUrl);
   for (const file of await readdir(directory)) assert.ok(!(await readFile(path.join(directory, file), "utf8")).includes("?program="));
   const bad = [
@@ -120,24 +162,126 @@ test("accepts only the inbox's program filter and strips it on creation, binding
   ];
   for (const suffix of bad) {
     await assert.rejects(prepare({ ...note, draftUrl: alias + suffix }), ReportDraftError);
-    await assert.rejects(prepare({ draftId: saved.draftId, draftUrl: alias + suffix }), ReportDraftError);
+    await assert.rejects(bind(saved.draftId, { programUrl, draftUrl: alias + suffix }), ReportDraftError);
   }
   await assert.rejects(prepare({ ...note, draftUrl: alias.replace("app.", "user@app.") + filter }), ReportDraftError);
   await assert.rejects(prepare({ ...note, programUrl: programUrl + filter }), ReportDraftError);
 });
 
 test("once-only binding survives concurrent calls and never overwrites immutable snapshot", async t => {
-  const { directory, prepare } = await fixture(t);
+  const { directory, prepare, bind } = await fixture(t);
   const saved = await prepare(note);
   const contents = await readFile(saved.draftPath, "utf8");
-  const calls = await Promise.allSettled([draftUrl, alias, other].map(url => prepare({ draftId: saved.draftId, draftUrl: url })));
+  const calls = await Promise.allSettled([draftUrl, alias, other].map(url => bind(saved.draftId, { draftUrl: url, programUrl })));
   const bound = await prepare({ draftId: saved.draftId });
   const competingWon = bound.draftUrl === other;
   assert.equal(calls.filter(call => call.status === "fulfilled").length, competingWon ? 1 : 2);
   assert.ok(calls.filter(call => call.status === "rejected").every(call => call.reason instanceof ReportDraftError));
-  assert.deepEqual(await prepare({ draftId: saved.draftId, draftUrl: bound.draftUrl }), bound);
+  assert.deepEqual(await bind(saved.draftId, { draftUrl: bound.draftUrl, programUrl }), bound);
+  assert.equal(bound.sourceProgramUrl, programUrl);
+  assert.equal(bound.boundProgramUrl, programUrl);
   assert.equal(await readFile(saved.draftPath, "utf8"), contents);
   assert.equal((await readdir(directory)).length, 2);
+});
+
+test("a program-first binding requires a positive matching observation before a sidecar is created", async t => {
+  const { directory, prepare, bind, forReceipt } = await fixture(t);
+  const saved = await prepare(note);
+  const { draftId } = saved;
+  const original = await readFile(saved.draftPath);
+  assert.equal(saved.sourceProgramUrl, programUrl);
+  for (const wrong of [undefined, programUrl.replace("/demo/", "/another/")]) {
+    await assert.rejects(bind(draftId, { programUrl: wrong, draftUrl }), /observed program/);
+  }
+  await assert.rejects(prepare({ draftId, draftUrl }), /draftId alone/);
+  assert.deepEqual(await readdir(directory), [path.basename(saved.draftPath)]);
+  assert.deepEqual(await forReceipt(draftId), saved);
+  const checked = await bind(draftId, { programUrl: programUrl.replace("/programs/", "/researcher/programs/"), draftUrl });
+  assert.equal(checked.boundProgramUrl, programUrl);
+  assert.equal(checked.sourceProgramUrl, programUrl);
+  assert.deepEqual(await readFile(saved.draftPath), original);
+});
+
+test("a legacy link alone is not an observed association and cannot be replaced during confirmation", async t => {
+  const { directory, prepare, bind, forReceipt } = await fixture(t);
+  const saved = await prepare(note);
+  const legacy = path.join(directory, saved.draftId + ".link.json");
+  const record = JSON.stringify({ version: 1, draftUrl: alias });
+  await writeFile(legacy, record, { mode: 0o600 });
+  const pending = await prepare({ draftId: saved.draftId });
+  assert.equal(pending.sourceProgramUrl, programUrl);
+  assert.equal(pending.unverifiedDraftUrl, alias);
+  assert.equal(pending.draftUrl, undefined);
+  assert.equal(pending.boundProgramUrl, undefined);
+  await assert.rejects(bind(saved.draftId, { draftUrl, programUrl: programUrl.replace("/demo/", "/wrong/") }));
+  await assert.rejects(bind(saved.draftId, { draftUrl: other, programUrl }), /different platform draft/);
+  assert.equal((await readdir(directory)).length, 2);
+  const bound = await bind(saved.draftId, { draftUrl, programUrl });
+  assert.equal(bound.draftUrl, alias);
+  assert.equal(bound.boundProgramUrl, programUrl);
+  assert.equal(bound.unverifiedDraftUrl, undefined);
+  assert.deepEqual(await forReceipt(saved.draftId), bound);
+  assert.equal(await readFile(legacy, "utf8"), record);
+  assert.equal((await readdir(directory)).length, 3);
+});
+
+test("a directly supplied draft retains its GUID pair and pins any observed program once", async t => {
+  const { prepare, bind, forReceipt } = await fixture(t);
+  const saved = await prepare({ draftUrl, title: note.title, description: note.description });
+  assert.equal(saved.sourceProgramUrl, undefined);
+  assert.equal((await bind(saved.draftId, { draftUrl: alias })).boundProgramUrl, undefined);
+  const bound = await bind(saved.draftId, { draftUrl: alias, programUrl });
+  assert.equal(bound.boundProgramUrl, programUrl);
+  assert.equal(bound.draftUrl, draftUrl);
+  await assert.rejects(bind(saved.draftId, { draftUrl: other, programUrl }), /different platform draft/);
+  await assert.rejects(bind(saved.draftId, { draftUrl, programUrl: programUrl.replace("/demo/", "/wrong/") }), /bound program/);
+  assert.deepEqual(await forReceipt(saved.draftId), bound);
+});
+
+test("a snapshot supplied with both destinations keeps both identities and requires their observed match", async t => {
+  const { directory, prepare, bind, forReceipt } = await fixture(t);
+  const saved = await prepare({ ...note, draftUrl: alias });
+  const { draftId } = saved;
+  assert.equal(saved.sourceProgramUrl, programUrl);
+  assert.equal(saved.draftUrl, alias);
+  assert.equal(saved.boundProgramUrl, undefined);
+  for (const observation of [{ draftUrl }, { draftUrl, programUrl: programUrl.replace("/demo/", "/wrong/") }, { draftUrl: other, programUrl }]) {
+    await assert.rejects(bind(draftId, observation), ReportDraftError);
+  }
+  assert.deepEqual(await readdir(directory), [path.basename(saved.draftPath)]);
+  assert.deepEqual(await forReceipt(draftId), saved);
+  const checked = await bind(draftId, { draftUrl, programUrl });
+  assert.equal(checked.draftUrl, alias);
+  assert.equal(checked.boundProgramUrl, programUrl);
+  assert.equal(checked.sourceProgramUrl, programUrl);
+  assert.deepEqual(await forReceipt(draftId), checked);
+});
+
+test("a receipt can inspect approved immutable facts after evidence moves, while resume and bind still recheck files", async t => {
+  const { root, prepare, bind, forReceipt } = await fixture(t);
+  const evidence = path.join(root, "synthetic-proof.txt");
+  await writeFile(evidence, "a sample");
+  const snapshot = await prepare({ ...note, attachments: [evidence] });
+  const bound = await bind(snapshot.draftId, { draftUrl, programUrl });
+  await writeFile(evidence, "changed example");
+  assert.deepEqual(await forReceipt(snapshot.draftId), bound);
+  await assert.rejects(prepare({ draftId: snapshot.draftId }), /attachment changed/i);
+  await rm(evidence);
+  await assert.rejects(prepare({ draftId: snapshot.draftId }), /missing or unreadable/);
+  await assert.rejects(bind(snapshot.draftId, { draftUrl, programUrl }), /missing or unreadable/);
+  assert.deepEqual(await forReceipt(snapshot.draftId), bound);
+});
+
+test("rejects POSIX records that allow other accounts access", { skip: process.platform === "win32" }, async t => {
+  const { directory, prepare, bind, forReceipt } = await fixture(t);
+  const saved = await prepare(note);
+  await bind(saved.draftId, { draftUrl, programUrl });
+  for (const file of [saved.draftPath, path.join(directory, saved.draftId + ".link.json")]) {
+    await chmod(file, 0o644);
+    await assert.rejects(prepare({ draftId: saved.draftId }), /must .*private/);
+    await assert.rejects(forReceipt(saved.draftId), /must .*private/);
+    await chmod(file, 0o600);
+  }
 });
 
 test("rejects remote and private evidence paths, unreadable or empty files and ambiguous basenames", async t => {

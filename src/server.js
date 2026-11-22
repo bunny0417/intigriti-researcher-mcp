@@ -1,9 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createRequire } from "node:module";
 import { z } from "zod";
+import { createHandoffJournal } from "./handoff-journal.js";
 import { ClientError } from "./client.js";
-import { prepareReportDraft, reportDraftShape, ReportDraftError } from "./report-draft.js";
-import { createNativeDraftHandoff, draftIntake, NativeHandoffError, nativeReceiptSchema } from "./draft-handoff.js";
+import { bindReportDraft, prepareReportDraft, readDraftForReceipt, reportDraftShape, ReportDraftError } from "./report-draft.js";
+import { draftIntake, NativeHandoffError, nativeReceiptSchema } from "./draft-handoff.js";
 import {
   activityRecord, isVisible, payoutRecord, programCard, programDetail,
   rulesVersion, scopeVersion, ViewError,
@@ -117,30 +118,62 @@ export function createServer(client, allowedIds = new Set()) {
     ...page, statusId: enumId.optional(), createdSince: since, paidSince: since,
   }, async query => pageResult(await client.listPayouts(query), query, payoutRecord));
 
-  const handoff = createNativeDraftHandoff();
+  const transact = createHandoffJournal();
+  const secretId = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
   tool("prepare_report_draft",
-    "Start with {} to ask which program to draft for, or use the program or existing draft link already supplied. Warn first: sign in to Intigriti and approve the specific draft and evidence list. Draft from an existing verified finding or user-selected notes and PoC files. Only the researcher submits. After explicit approval, call approve with draftId and approvalId, then use @Chrome or @Computer. Local mode prepares/resumes/binds. Finish records a browser-observed outcome only.",
-    { ...reportDraftShape, mode: z.enum(["browser", "local", "approve", "finish", "status", "cancel"]).default("browser"),
-      approvalId: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), receipt: nativeReceiptSchema.optional() },
-    async ({ mode, approvalId, receipt, ...args }) => {
-      if ((approvalId !== undefined && mode !== "approve") || (receipt !== undefined && mode !== "finish")) {
-        throw new ToolError("Use approvalId only in approve mode, and receipt only in finish mode.");
+    "Start with {} to ask for a program, or use the supplied link. For a named file in Downloads, pass Downloads/filename directly; the MCP resolves its location. To add files to an existing draft, send draftUrl, attachments, and optionally expectedTitle; omit all report fields. Show the review and wait for explicit chat approval. Use @Chrome or @Computer for approved portal work. Check before Create, edits and each upload. Finish after reopening the draft. Only the researcher submits.",
+    { ...reportDraftShape, mode: z.enum(["browser", "local", "approve", "check", "finish", "status", "cancel"]).default("browser"),
+      approvalId: secretId.optional(), handoffId: secretId.optional(), receipt: nativeReceiptSchema.optional(),
+      observedTitle: z.string().max(100).optional().describe("In check mode, copy the actual visible title of the existing draft when an expectedTitle was reviewed.") },
+    async ({ mode, approvalId, handoffId, receipt, observedTitle, ...args }) => {
+      if (observedTitle !== undefined && (mode !== "check" || !args.draftUrl)) {
+        throw new ToolError("Use observedTitle with the observed draftUrl in check mode.");
       }
-      if (mode === "status" || mode === "cancel") {
-        if (!args.draftId || Object.keys(args).length !== 1) throw new ToolError("Supply only draftId with status or cancel.");
-        return mode === "status" ? handoff.status(args.draftId.toLowerCase()) : handoff.cancel(args.draftId.toLowerCase());
+      if ((approvalId !== undefined) !== (mode === "approve") ||
+          (receipt !== undefined) !== (mode === "finish") ||
+          (handoffId !== undefined) !== (mode === "check" || mode === "finish")) {
+        throw new ToolError("Use approvalId for approve, handoffId for check, and handoffId plus receipt for finish.");
       }
-      if (mode === "approve" || mode === "finish") {
-        if (!args.draftId || Object.keys(args).length !== 1 || (mode === "approve" ? !approvalId : !receipt)) {
-          throw new ToolError("Use draftId and the matching approvalId to approve, or draftId and a browser receipt to finish.");
-        }
+      if (mode === "local" || mode === "browser") {
+        const intake = draftIntake(args);
+        if (intake) return intake;
         const draft = await prepareReportDraft(args);
-        return mode === "approve" ? handoff.approve(draft, approvalId) : handoff.finish(draft, receipt);
+        if (mode === "local") return { ...draft, nextAction: "show_local_preview",
+          message: "This is a local preview. Stop here for a preview-only request. If the researcher later wants a portal draft, start its review with this draftId in browser mode." };
+        return transact(draft, "start", m => m.start(draft));
       }
-      const intake = draftIntake(args);
-      if (intake) return intake;
-      const draft = await prepareReportDraft(args);
-      return mode === "local" ? draft : handoff.start(draft);
+      if (!args.draftId || Object.keys(args).some(k => k !== "draftId" &&
+          !(mode === "check" && ["draftUrl", "programUrl"].includes(k)))) {
+        throw new ToolError("Specify a draftId. Only check mode also accepts browser-observed program and draft URLs.");
+      }
+      const id = args.draftId.toLowerCase();
+      if (mode === "status" || mode === "cancel" || mode === "finish") {
+        let manifest;
+        try { manifest = await readDraftForReceipt(id); } catch (error) {
+          if (mode !== "finish" && error instanceof ReportDraftError && error.code === "draft_not_found") {
+            return { draftId: id, status: "not_found", message: "No local draft was found under this user profile." };
+          }
+          throw error;
+        }
+        if (mode === "finish") return transact(manifest, mode, m => m.finish(manifest, receipt, handoffId), handoffId);
+        return transact(manifest, mode, m => m[mode](id));
+      }
+      try {
+        const draft = await prepareReportDraft({ draftId: id });
+        if (mode === "approve") {
+          return transact(draft, mode, m => m.approve(draft, approvalId));
+        }
+        const observed = { programUrl: args.programUrl, draftUrl: args.draftUrl, observedTitle };
+        const checkpoint = await transact(draft, "check", m => m.checkpoint(draft, handoffId, observed), handoffId);
+        if (!args.draftUrl) return checkpoint;
+        const bound = await bindReportDraft(id, { programUrl: args.programUrl, draftUrl: args.draftUrl });
+        return transact(bound, "check", m => m.checkpoint(bound, handoffId), handoffId);
+      } catch (error) {
+        if (!(error instanceof ReportDraftError) || error.code !== "evidence_invalid") throw error;
+        const manifest = await readDraftForReceipt(id);
+        await transact(manifest, mode, m => m.invalidateEvidence(id, mode, approvalId ?? handoffId));
+        throw new ToolError(error.message + " This approval has ended. Record any verified browser results before requesting a new review.");
+      }
     }, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
 
   return server;

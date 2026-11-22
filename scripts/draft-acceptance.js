@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const entry = fileURLToPath(new URL("../src/index.js", import.meta.url));
 const tool = "prepare_report_draft";
@@ -20,8 +21,10 @@ const samplePng = Buffer.from(
   "base64",
 );
 
-async function withServer(profile, guard, run) {
-  const client = new Client({ name: "local-draft-acceptance", version: "1" });
+async function withServer(profile, guard, run, elicit) {
+  const capabilities = elicit ? { elicitation: { form: {} } } : {};
+  const client = new Client({ name: "local-draft-acceptance", version: "1" }, { capabilities });
+  if (elicit) client.setRequestHandler(ElicitRequestSchema, elicit);
   try {
     await client.connect(new StdioClientTransport({
       command: process.execPath, args: ["--import", guard, entry], cwd: profile,
@@ -33,7 +36,7 @@ async function withServer(profile, guard, run) {
     const { tools } = await client.listTools();
     assert.ok(tools.some(item => item.name === tool), "Draft tool missing from tools/list");
     assert.ok(!tools.some(item => /submit_report|finalize_submission/.test(item.name)));
-    await run(args => client.callTool({ name: tool, arguments: args }));
+    return await run(args => client.callTool({ name: tool, arguments: args }));
   } finally {
     await client.close();
   }
@@ -83,55 +86,111 @@ function checkReview(review, draft) {
   assert.equal(review.destination, draft.draftUrl ?? draft.programUrl);
   assert.deepEqual(review.review.fields, draft.fields);
   assert.deepEqual(review.missingFields, draft.missingFields);
-  assert.deepEqual(review.evidence, draft.attachments.map(({ name, size }) => ({ name, size })));
-  assert.ok(!Object.hasOwn(review, "attachments"), "Unapproved handoff exposed a file manifest");
+  assert.deepEqual(review.evidence, draft.attachments, "Review must identify the exact canonical paths, names and sizes");
+  assert.equal(review.nextAction, "ask_for_approval");
+  assert.match(review.question, /\?/);
+  assert.ok(!Object.hasOwn(review, "handoffId"), "Unapproved review granted an attempt capability");
   assert.match(review.message, /signed in/i);
-  assert.match(review.instructions.join(" "), /fresh chat reply|explicit user-facing confirmation/i);
+  assert.match(review.instructions.join(" "), /fresh chat reply|explicit user-facing confirmation|native user confirmation/i);
 }
 
-async function testHostHandoff(invoke, draft, firstApproval, round) {
+async function testHostHandoff(invoke, draft, firstApproval, round, withPeer) {
   const { draftId } = draft;
   const review = unpack(await invoke({ draftId }));
   checkReview(review, draft);
-  const approve = { mode: "approve", draftId, approvalId: review.approvalId };
+  const approve = review.afterApproval;
+  assert.deepEqual(approve, { mode: "approve", draftId, approvalId: review.approvalId });
   const receipt = {
     ...(draft.programUrl ? { programUrl: draft.programUrl } : {}), draftUrl,
     savedFields: Object.keys(draft.fields), uploadedFiles: draft.attachments.map(file => file.name),
   };
-  const finish = { mode: "finish", draftId, receipt };
+  const wrongId = "x".repeat(43);
+  const badCheck = { mode: "check", draftId, handoffId: wrongId, programUrl, draftUrl };
+  await reject(invoke, badCheck);
+  await reject(invoke, { mode: "local", draftId, draftUrl });
+  await reject(invoke, { draftId, draftUrl });
   await reject(invoke, { mode: "approve", draftId });
   await reject(invoke, { ...approve, approvalId: "x".repeat(43) });
   if (firstApproval) await reject(invoke, { ...approve, approvalId: firstApproval });
-  await reject(invoke, finish);
-  if (round === 3) {
-    assert.equal(unpack(await invoke({ draftId, mode: "cancel" })).status, "cancelled");
-    await reject(invoke, approve);
-    return;
-  }
-
+  await reject(invoke, { mode: "finish", draftId, receipt, handoffId: wrongId });
   // Represents the researcher's explicit reply in this synthetic client only.
-  const handoff = unpack(await invoke(approve));
+  let handoff = unpack(await invoke(approve));
   assert.equal(handoff.status, "ready_for_browser");
   assert.deepEqual(handoff.hostTools, ["@Chrome", "@Computer"]);
   assert.deepEqual(handoff.fields, draft.fields);
   assert.deepEqual(handoff.attachments, draft.attachments);
+  assert.match(handoff.handoffId, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(handoff.handoffId, review.approvalId);
   assert.match(handoff.instructions[0], /@Chrome[\s\S]*@Computer/);
-  assert.match(handoff.instructions.join(" "), /only you submit|submit submission action belongs solely to the researcher/i);
-  assert.match(handoff.instructions.join(" "), /reopen the same bound draft/i);
+  assert.equal(handoff.nextAction, "open_in_browser");
+  assert.equal(handoff.openUrl, draft.draftUrl ?? draft.programUrl);
+  assert.deepEqual(handoff.observe, draft.draftUrl ? ["draftUrl", ...(draft.sourceProgramUrl ? ["programUrl"] : [])] : ["programUrl"]);
+  assert.match(handoff.instructions.join(" "), /only the researcher submits/i);
   await reject(invoke, approve);
+  let check = handoff.checkArgs;
+  let finish = { mode: "finish", draftId, handoffId: handoff.handoffId, receipt };
+  let superseded;
+  await reject(invoke, check);
+  await reject(invoke, finish);
+  if (draft.sourceProgramUrl) {
+    await reject(invoke, { ...check, draftUrl });
+    await reject(invoke, { ...check, programUrl: programUrl.replace("/example/", "/wrong/"), draftUrl });
+    if (!draft.draftUrl) {
+      const preCreate = unpack(await invoke({ ...check, programUrl }));
+      assert.equal(preCreate.status, "program_checked");
+      assert.equal(preCreate.nextAction, "open_or_create_draft");
+      assert.deepEqual(preCreate.checkArgs, { ...check, programUrl });
+      await reject(invoke, finish);
+    }
+  }
+  const observed = { draftUrl, ...(draft.programUrl && { programUrl }) };
+  const checked = unpack(await invoke({ ...check, ...observed }));
+  assert.equal(checked.status, "handoff_checked");
+  assert.equal(checked.nextAction, "fill_and_verify_draft");
+  assert.deepEqual(checked.checkBeforeEditOrUpload, check);
+  assert.match(checked.instructions.join(" "), /reopen the same bound draft/i);
+  assert.equal(unpack(await invoke(check)).status, "handoff_checked");
+  const bound = unpack(await invoke({ mode: "local", draftId }));
+  assert.ok([draftUrl, draftAlias].includes(bound.draftUrl));
+  if (draft.programUrl) assert.equal(bound.boundProgramUrl, programUrl);
+  await reject(invoke, { ...check, ...observed, draftUrl: draftUrl.replace("000002/create", "000003/create") });
   await reject(invoke, { ...finish, receipt: { ...receipt, uploadedFiles: ["unapproved-file.txt"] } });
 
-  // Simulate observation of a clean draft URL and a readback by the Codex host.
-  const bound = unpack(await invoke({ mode: "local", draftId, draftUrl }));
-  assert.equal(bound.draftId, draftId);
-  assert.ok([draftUrl, draftAlias].includes(bound.draftUrl));
+  if (round === 3) {
+    await withPeer(async peer => {
+      const visible = unpack(await peer({ mode: "status", draftId }));
+      assert.equal(visible.status, "ready_for_browser");
+      assert.ok(!Object.hasOwn(visible, "handoffId"));
+      await reject(peer, check);
+      assert.equal(unpack(await peer({ mode: "cancel", draftId })).status, "cancelled");
+    });
+    await reject(invoke, check);
+    await reject(invoke, finish);
+    superseded = finish;
+    const fresh = unpack(await invoke({ draftId }));
+    handoff = unpack(await invoke({ ...approve, approvalId: fresh.approvalId }));
+    assert.notEqual(handoff.handoffId, check.handoffId);
+    check = { ...check, handoffId: handoff.handoffId };
+    finish = { ...finish, handoffId: handoff.handoffId };
+    await reject(invoke, check);
+    assert.equal(unpack(await invoke({ ...check, ...observed })).status, "handoff_checked");
+    await reject(invoke, superseded);
+  }
   if (round === 4) {
-    receipt.pendingFiles = [receipt.uploadedFiles.pop()];
+    const lost = draft.attachments[0];
+    await unlink(lost.path);
+    await reject(invoke, check);
+    await reject(invoke, { mode: "local", draftId });
+    receipt.pendingFiles = [lost.name];
+    receipt.uploadedFiles = receipt.uploadedFiles.filter(name => name !== lost.name);
   }
   const outcome = unpack(await invoke(finish));
+  if (superseded) await reject(invoke, superseded);
   assert.equal(outcome.status, round === 4 ? "browser_reported_partial" : "browser_reported_saved");
+  assert.deepEqual(outcome.receipt.pendingFiles, receipt.pendingFiles ?? []);
   assert.equal(unpack(await invoke({ mode: "status", draftId })).status, outcome.status);
   assert.deepEqual(unpack(await invoke(finish)), outcome, "Replaying the same host receipt changed its outcome");
+  return { outcome, finish, superseded };
 }
 
 async function reject(call, args) {
@@ -191,7 +250,7 @@ async function runRound(round, root, guard) {
     questions: [{ question: "Review complete?", answer: "Yes" }],
   };
   if (round === 2) delete fields.impact;
-  const location = round === 10 ? { draftUrl } : { programUrl };
+  const location = round === 10 ? { draftUrl } : round === 8 ? { programUrl, draftUrl } : { programUrl };
   const args = { ...location, ...fields, attachments: [note, image] };
   let draft;
   let snapshot;
@@ -219,32 +278,40 @@ async function runRound(round, root, guard) {
       metadata.push({ path: await realpath(file), name: path.basename(file), size: (await stat(file)).size });
     }
     assert.deepEqual(draft.attachments, metadata);
-    if (round % 2 === 1) {
-      const bound = unpack(await call({ draftId: draft.draftId, draftUrl }));
-      assert.deepEqual(bound.fields, draft.fields);
-      assert.deepEqual(bound.attachments, draft.attachments);
-      assert.equal(bound.draftId, draft.draftId);
-      assert.ok([draftUrl, draftAlias].includes(bound.draftUrl));
-      const alias = unpack(await call({ draftId: draft.draftId, draftUrl: draftAlias }));
-      assert.equal(alias.draftId, bound.draftId);
-      assert.ok([draftUrl, draftAlias].includes(alias.draftUrl));
-      await reject(call, { draftId: draft.draftId, draftUrl: draftUrl.replace("000002/create", "000003/create") });
-      draft = alias;
-    }
+    assert.equal(draft.sourceProgramUrl, location.programUrl);
+    assert.equal(draft.boundProgramUrl, undefined);
+    await reject(call, { draftId: draft.draftId, draftUrl });
     snapshot = await readFile(draft.draftPath, "utf8");
     assert.ok(snapshot.includes(fields.title));
     assert.ok(!snapshot.includes(fileBody.trim()), "Draft unexpectedly copied attachment bytes");
     assert.ok(!snapshot.includes("INTIGRITI_API_TOKEN"), "Draft serialized token configuration");
     await reject(call, { ...args, submit: true });
   });
-  await withServer(profile, guard, async invoke => {
+  let prompts = 0;
+  const elicit = round === 6 ? async ({ params }) => {
+    prompts++;
+    return { action: "cancel" };
+  } : undefined;
+  const withPeer = run => withServer(profile, guard, run);
+  const { outcome, finish, superseded } = await withServer(profile, guard, async invoke => {
     const call = args => invoke({ mode: "local", ...args });
     assert.deepEqual(unpack(await call({ draftId: draft.draftId })), draft);
-    await testHostHandoff(invoke, draft, firstApproval, round);
+    const completed = await testHostHandoff(invoke, draft, firstApproval, round, withPeer);
     if (round === 9) await checkChangedEvidence(invoke, profile);
     await exerciseFailure(round, call, args, draft, profile);
     assert.equal(await readFile(draft.draftPath, "utf8"), snapshot);
     assert.deepEqual(await readFile(image), samplePng);
+    return completed;
+  }, elicit);
+  if (elicit) assert.equal(prompts, 0, "Advertised forms must not replace the researcher's explicit chat approval");
+  // A new server can read the durable outcome, including pending items even
+  // when a selected file was deleted. It cannot reuse that attempt for edits.
+  await withPeer(async peer => {
+    assert.deepEqual(unpack(await peer({ mode: "status", draftId: draft.draftId })), outcome);
+    assert.deepEqual(unpack(await peer(finish)), outcome);
+    if (superseded) await reject(peer, superseded);
+    await reject(peer, { mode: "check", draftId: draft.draftId, handoffId: finish.handoffId });
+    await reject(peer, { ...finish, handoffId: "x".repeat(43) });
   });
 }
 

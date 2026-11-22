@@ -2,32 +2,38 @@
 
 ![An AI brain controls a robotic MCP arm holding a program record](banner.png)
 
-**v1.1.0 · Codex only.** Browse Intigriti programs, compare rules and scope changes, check payouts, and prepare researcher report drafts.
+**v1.1.1 · Codex only.** Browse Intigriti programs, compare rules and scope changes, check payouts, and prepare researcher report drafts.
 
-**Before saving or uploading, sign in to Intigriti and explicitly approve the destination draft, fields and exact files.** Codex uses its built-in **@Chrome** controls in your signed-in browser, with **@Computer** as the fallback. You handle sign-in and 2FA in that browser. You control final review and submission.
+**Before saving or uploading to Intigriti, sign in and approve the destination, fields and exact files in chat.** Codex uses its connected **@Chrome** control in your signed-in browser, with **@Computer** as a fallback where available. You handle sign-in and 2FA in that browser. You control final review and submission.
 
 Use your browser's existing settings. If an available control can open the picker but cannot select a file, select the approved file yourself. Codex checks the saved attachment afterward. Developer mode and remote debugging are unnecessary.
 
 ## Connect to Codex
 
-1. Clone this repository. From its root, run the following commands with Node.js 22 or newer and npm.
+1. On GitHub, choose **Code → Download ZIP**. Extract the ZIP. Open the extracted folder containing this README and `package.json` as a project in Codex. Trust the project when Codex asks, after checking that it is the repository you intended to download.
+
+2. Paste this into a chat in that project:
+
+   > Please set up the Intigriti tool in this folder for me. Check for Node.js 22 or newer, then run the two setup commands in the README. Tell me when I can start a practice draft.
+
+   If Codex tells you Node.js is missing, install Node.js 22 or newer with npm, reopen Codex, and repeat the request. [Download Node.js](https://nodejs.org/en/download)
+
+   The commands Codex runs in the extracted folder are:
 
    ```sh
    npm ci
    npm run setup:codex
    ```
 
-   Setup creates a local `.env` and configures `.codex/config.toml`. If setup prints a section to merge into an existing config, add it there.
+   Setup creates a local `.env` and configures `.codex/config.toml`. If setup finds an existing configuration, ask Codex to merge the Intigriti entry it printed.
 
-2. For the six researcher account lookups, create a personal access token (PAT). Paste it after the equals sign in the project-root `.env` and save the file. Browser drafting uses your interactive Intigriti sign-in. [Create a researcher token](https://app.intigriti.com/researcher/personal-access-tokens)
+3. Sign in to Intigriti in your browser. Start a **new chat in the same Codex project** and try:
 
-   ```dotenv
-   INTIGRITI_API_TOKEN=
-   ```
+   > Help me make a practice report on Intigriti. Show me what you’ll save before you do anything on the website.
 
-3. Open this folder as a **trusted project** in Codex. If it is already open, restart Codex to load the configuration. Try this in a new chat.
+   Drafting uses your browser sign-in. If the new chat cannot find the Intigriti tool, restart Codex and reopen the trusted project. Start a new project chat after updating this tool, too.
 
-   > Use Intigriti to show five open programs and their bounty ranges, including the currency.
+**Optional account lookups.** To list programs or check payouts through the API, create a personal access token. Open the `.env` file in the extracted folder, paste the token after `INTIGRITI_API_TOKEN=`, save, and start a new project chat. Keep the token in that local file. [Create a researcher token](https://app.intigriti.com/researcher/personal-access-tokens)
 
 ## Available tools
 
@@ -54,18 +60,47 @@ For a complete list, continue from `nextOffset` until it is `null`. A filtered p
 
 You can prepare a private local package and resume using its returned `draftId`. To inspect an existing draft, give Codex its exact link. Deletion requires a separate request for the specific live draft and confirmation at the platform’s destructive dialog.
 
-Use ordinary requests such as “check the draft status” or “cancel the handoff.” Codex handles the tool modes. `browser` prepares the approval request, `approve` records your permission, and `finish` records the observed browser results. `local` creates or resumes a package and can bind it to its live draft link. `status` shows the handoff state. `cancel` ends the handoff only. If neither built-in browser control is available, the local package stays prepared.
+Use ordinary requests such as “check the draft status” or “cancel the handoff.” Codex shows the complete evidence paths before obtaining your explicit approval in chat. A review ID identifies the request and is not evidence of a human decision.
+
+To add evidence to an existing draft, paste its edit link and the paths of the files you want to attach. You can also give the existing title for Codex to check in the browser. This review covers only those files and requires no copy of the report text.
+
+If your file is in Downloads, say “Attach the file called practice note.txt in my Downloads.” Check its name and location in the review. For a file in a different folder on Windows, right-click it in File Explorer, choose **Copy as path**, and paste that into the chat.
+
+Before editing or uploading, Codex checks the current handoff, program and draft identity. Status, cancellation and browser-reported results are shared across local sessions. To take over a handoff from another session, inspect the live draft, cancel the old handoff and approve a fresh review. Cancelling stops future authorized steps; check Intigriti for edits or uploads already in progress.
 
 ## Privacy
 
 Program lookups return Public programs by default. If the company permits sharing a restricted program with your Codex environment, add its GUID to the comma-separated `INTIGRITI_ALLOWED_PROGRAM_IDS` setting in `.env` and restart Codex. [Researcher terms](https://kb.intigriti.com/en/articles/5466165-researcher-terms-conditions)
 
-The MCP stores local snapshots as plain-text JSON under `~/.intigriti-researcher-mcp/drafts`. Snapshots include report text and evidence paths and metadata. Evidence files stay at the paths you selected. Report inputs, tool results and requested payout details enter the Codex conversation. [Reporting and attachment limits](https://kb.intigriti.com/en/articles/5379086-how-to-write-and-submit-a-good-report)
+The MCP stores plain-text snapshots and handoff records under `~/.intigriti-researcher-mcp/drafts`. Snapshots contain report text, evidence paths and file metadata. New snapshots also record a SHA-256 digest so the MCP can distinguish a file picker changing metadata from an edit to the file's contents. Handoff records contain local state and browser-reported outcomes. Evidence files stay at the paths you selected. Report inputs, tool results and requested payout details enter the Codex conversation. [Reporting and attachment limits](https://kb.intigriti.com/en/articles/5379086-how-to-write-and-submit-a-good-report)
 
-## Tests and license
+## How we tested drafting
 
-Run `npm test` for the regression suite and `npm run test:draft` for offline draft acceptance checks. With a PAT configured, `npm run test:live` checks the six account lookups, including personal payouts.
+We used fresh Codex chats running GPT-6.1 Terra, a signed-in Windows browser, and synthetic text files. In a simulated first-time researcher session, the user described a practice report, pasted a program link, named a file in Downloads, and approved the review in ordinary chat. Codex created the draft and returned its link. In a follow-up chat it added a second file, reopened the same draft, and verified both attachment rows. We also ran setup in a clean copy with a blank token file. These were separate tests on a machine that already had Node.js and an authenticated browser.
 
-For v1.1.0, ten live @Chrome rounds uploaded synthetic evidence and verified the files and report fields by reopening the unsubmitted draft. @Computer availability depends on the host's ability to verify the browser window.
+| Scenario | Observed result |
+| --- | --- |
+| Wrong draft title | The title check rejected the mismatch before any edit or upload. |
+| File edited after review | A change with the same filename, size and modification time ended the approval. Restoring the original bytes did not revive it. |
+| Successful upload retried | Codex recovered the saved receipt. Reopening the draft showed one row for that file. |
+| Different evidence with the same name and size | Codex preserved the existing file and recorded the new one as pending. |
+| Portal disabled **Add attachments** | Codex left the existing attachments in place and reported the requested files as pending. |
+
+To repeat the automated checks after installation, run `npm test` for regression coverage and `npm run test:draft` for ten offline draft scenarios. The offline checks start the shipped MCP server with isolated profiles and synthetic evidence. They need neither a PAT nor a browser. The separate `npm run test:live` command uses your PAT to check the six account lookups, including payouts.
+
+## Current limitations
+
+- **Browser access.** Local preparation works on its own. Saving on Intigriti requires a supported Codex browser or computer control, an interactive sign-in and a draft the account can edit. Browser or portal changes can interrupt the flow. If the file picker needs your input, select the reviewed file there.
+- **Verification.** A saved receipt records what Codex observed after reopening the draft. A partial receipt lists what it could verify and what is still pending. Filename and size alone cannot identify the contents of an existing remote attachment. A local SHA-256 digest checks the local file.
+- **Files and platforms.** The Downloads shortcut resolves a named file in the standard Downloads folder under your home directory. For a relocated folder, supply the full path. Automated tests cover Windows and Linux; the live browser results above are from Windows. Account lookups and browser sign-in use separate credentials.
+- **Final review.** Check the report text, selected program, required fields and evidence in the portal before deciding whether to submit. Cancelling a handoff stops future authorized steps. Edits or uploads already in progress may have reached the portal.
+
+## Possible future improvements
+
+- Add a setup check that distinguishes a missing MCP connection, a missing PAT for account lookups and unavailable browser controls.
+- Expand live testing to macOS, Linux desktops, relocated Downloads folders and more file-picker configurations.
+- Show a clearer recovery view for interrupted uploads, with the verified and pending files side by side before a retry.
+
+## License
 
 Licensed under the [MIT License](LICENSE).
