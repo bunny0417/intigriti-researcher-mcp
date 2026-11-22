@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getInboxCounts, InboxCountError, parseInboxCounter } from "../src/inbox-counts.js";
+import { previewInboxCounts as getInboxCounts, InboxCountError, parseInboxCounter } from "../src/inbox-counts.js";
 
 const inboxUrl = "https://app.intigriti.com/researcher/inbox";
 const menu = ["Draft", "Triage", "Pending", "Closed / Archived", "Additional portal status"];

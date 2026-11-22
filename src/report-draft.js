@@ -167,9 +167,9 @@ function sameFileVersion(first, second) {
     first.mtimeNs === second.mtimeNs && first.ctimeNs === second.ctimeNs;
 }
 
-async function evidenceDigest(actual, info) {
+export async function evidenceDigest(actual, info, copyTo) {
   const cached = recentDigests.get(actual);
-  if (info.ino !== 0n && cached && sameFileVersion(info, cached.info)) return cached.digest;
+  if (!copyTo && info.ino !== 0n && cached && sameFileVersion(info, cached.info)) return cached.digest;
 
   const file = await open(actual, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
@@ -182,6 +182,7 @@ async function evidenceDigest(actual, info) {
     for await (const chunk of stream) {
       bytes += chunk.length;
       hash.update(chunk);
+      if (copyTo) await copyTo.writeFile(chunk);
     }
     if (bytes !== Number(info.size) || !sameFileVersion(info, await file.stat({ bigint: true }))) {
       throw new ReportDraftError("An attachment changed while it was being checked.");
@@ -196,7 +197,7 @@ async function evidenceDigest(actual, info) {
   }
 }
 
-async function evidence(value) {
+async function evidence(value, copyTo) {
   checkEvidencePath(value);
   await verifiedDirectory(path.dirname(value), false);
   const info = await lstat(value, { bigint: true });
@@ -211,7 +212,7 @@ async function evidence(value) {
   if (info.size > (image ? 10_000_000n : 1_000_000_000n)) {
     throw new ReportDraftError("An attachment exceeds the platform limit of 10 MB for PNG/JPEG/GIF or 1 GB for other files.");
   }
-  const sha256 = await evidenceDigest(actual, info);
+  const sha256 = await evidenceDigest(actual, info, copyTo);
   if (!sameFileVersion(info, await lstat(value, { bigint: true }))) {
     throw new ReportDraftError("An attachment changed while its metadata was being checked.");
   }
@@ -343,12 +344,37 @@ async function binding(snapshot, dir, observed) {
   return { draftUrl: original.draftUrl ?? firstDraft, boundProgramUrl: checked.programUrl };
 }
 
-function result(snapshot, draftPath, links) {
+// Keep source identities and digests server-side. A receipt-only manifest has
+// no verified bytes and cannot be used to produce browser picker files.
+const verifiedEvidence = new WeakMap();
+export function reviewedAttachments(draft) {
+  const records = verifiedEvidence.get(draft);
+  if (!records) throw new ReportDraftError("Check this draft's evidence before preparing the picker.", "evidence_invalid");
+  return records;
+}
+
+function sameAttachment(saved, current) {
+  return saved.path === current.path && saved.name === current.name &&
+    saved.size === current.size && saved.device === current.device && saved.inode === current.inode &&
+    saved.modified === current.modified &&
+    (saved.sha256 ? saved.sha256 === current.sha256 : saved.changed === current.changed);
+}
+
+export async function copyReviewedAttachment(record, output) {
+  const copied = await evidence(record.path, output);
+  if (!sameAttachment(record, copied)) {
+    throw new ReportDraftError("An attachment changed while preparing the picker.", "evidence_invalid");
+  }
+}
+
+function result(snapshot, draftPath, links, verified) {
   const { draftId, programUrl, fields, attachments } = snapshot;
-  return { status: "prepared_locally", draftId, draftPath, ...(programUrl && { programUrl, sourceProgramUrl: programUrl }), ...links,
+  const draft = { status: "prepared_locally", draftId, draftPath, ...(programUrl && { programUrl, sourceProgramUrl: programUrl }), ...links,
     ...(snapshot.expectedTitle && { expectedTitle: snapshot.expectedTitle }),
     fields, attachments: attachments.map(({ path, name, size }) => ({ path, name, size })),
     missingFields: Object.keys(fields).length ? ["asset", "vulnerabilityType", "severity", "impact"].filter(key => !fields[key]) : [] };
+  if (verified) verifiedEvidence.set(draft, verified);
+  return draft;
 }
 
 export async function privateStore(directory, create) {
@@ -374,20 +400,16 @@ async function restore(draftId, directory, { verifyFiles, observed }) {
     if (!saved.success || saved.data.draftId !== id) throw new ReportDraftError("The local draft record is invalid.");
     const snapshot = saved.data;
     validateFields(snapshot.fields, snapshot.draftUrl, snapshot.attachments);
+    let current;
     if (verifyFiles) {
-      const current = await inspectAttachments(snapshot.attachments.map(item => item.path));
+      current = await inspectAttachments(snapshot.attachments.map(item => item.path));
       for (const [i, record] of current.entries()) {
-        const savedFile = snapshot.attachments[i];
-        const matches = savedFile.path === record.path && savedFile.name === record.name &&
-          savedFile.size === record.size && savedFile.device === record.device &&
-          savedFile.inode === record.inode && savedFile.modified === record.modified &&
-          (savedFile.sha256 ? savedFile.sha256 === record.sha256 : savedFile.changed === record.changed);
-        if (!matches) {
+        if (!sameAttachment(snapshot.attachments[i], record)) {
           throw new ReportDraftError(`Attachment ${i + 1}: the attachment changed since preparation. Review a new snapshot with the intended files.`, "evidence_invalid");
         }
       }
     }
-    return result(snapshot, file, await binding(snapshot, dir, observed));
+    return result(snapshot, file, await binding(snapshot, dir, observed), current);
   } catch (error) {
     if (error instanceof ReportDraftError) throw error;
     if (error.code === "ENOENT") throw new ReportDraftError("Local draft snapshot was not found.", "draft_not_found");
@@ -430,7 +452,7 @@ export async function prepareReportDraft(args, { directory = defaultDirectory() 
     const file = path.join(dir, id + ".json");
     const snapshot = { version: 1, draftId: id, ...links, ...(expectedTitle && { expectedTitle }), fields, attachments: evidence };
     await publishJson(file, snapshot);
-    return result(snapshot, file, links.draftUrl ? { draftUrl: links.draftUrl } : {});
+    return result(snapshot, file, links.draftUrl ? { draftUrl: links.draftUrl } : {}, evidence);
   } catch (error) {
     if (error instanceof ReportDraftError) throw error;
     if (error.code === "ENOENT" && draftId) throw new ReportDraftError("Local draft snapshot was not found.");

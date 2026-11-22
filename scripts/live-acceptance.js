@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { createInterface } from "node:readline/promises";
 
 const names = [
   "get_inbox_counts", "get_inbox_reports", "get_program", "get_rules_version", "get_scope_version",
@@ -11,6 +13,9 @@ const names = [
 const entry = fileURLToPath(new URL("../src/index.js", import.meta.url));
 const rounds = 10;
 const coverage = { activityRow: false, payoutRow: false, followedContinuation: false };
+// An interactive operator may opt in to real payout reads and approve each page.
+const payoutPrompts = process.argv.includes("--payouts") && process.stdin.isTTY
+  ? createInterface({ input: process.stdin, output: process.stderr }) : undefined;
 
 // Fixed diagnostic messages keep account data out of assertion output.
 function check(condition, message) {
@@ -106,6 +111,11 @@ async function runRound(client, round, samples) {
   const payoutArgs = { limit: 1, offset: 0 };
   if (round % 3 === 0) payoutArgs.paidSince = since;
   if (round % 3 === 1) payoutArgs.createdSince = since;
+  if (!payoutPrompts) {
+    const denied = await client.callTool({ name: "list_payouts", arguments: payoutArgs });
+    check(denied.isError && denied.content[0]?.text.includes("confirmation form"), "Unattended payout access should require confirmation");
+    return;
+  }
   const payouts = await call(client, "list_payouts", payoutArgs);
   checkPage(payouts, 0, 1);
   for (const p of payouts.records) {
@@ -122,7 +132,12 @@ async function runRound(client, round, samples) {
 let samples;
 try {
   for (let round = 1; round <= rounds; round++) {
-    const client = new Client({ name: "intigriti-live-acceptance", version: "1" });
+    const client = new Client({ name: "intigriti-live-acceptance", version: "1" },
+      { capabilities: payoutPrompts ? { elicitation: { form: {} } } : {} });
+    if (payoutPrompts) client.setRequestHandler(ElicitRequestSchema, async ({ params }) => {
+      const answer = await payoutPrompts.question(params.message + "\nType yes to approve this read: ");
+      return answer === "yes" ? { action: "accept", content: { confirmed: true } } : { action: "decline" };
+    });
     const env = { INTIGRITI_ALLOWED_PROGRAM_IDS: "" };
     if (process.env.INTIGRITI_API_TOKEN !== undefined) env.INTIGRITI_API_TOKEN = process.env.INTIGRITI_API_TOKEN;
     try {
@@ -132,7 +147,7 @@ try {
       check(tools.filter(t => t.name !== "prepare_report_draft").every(t => t.annotations?.readOnlyHint === true), "Missing read-only annotation");
       samples ??= await selectPrograms(client);
       await runRound(client, round, samples);
-      console.log(`Round ${round}/${rounds} passed: fresh stdio connection and all six live tools.`);
+      console.log(`Round ${round}/${rounds} passed (fresh stdio, program APIs and payout permission check).`);
     } finally {
       await client.close();
     }
@@ -141,4 +156,6 @@ try {
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;
+} finally {
+  payoutPrompts?.close();
 }

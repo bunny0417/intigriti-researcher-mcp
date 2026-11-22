@@ -2,16 +2,18 @@
 
 ![Intigriti Researcher MCP for Codex: programs, inbox status, report drafts and payouts.](banner.png)
 
-Ask Codex about your Intigriti bug bounty work in plain language. **You approve draft edits and uploads. Only you submit the report.**
+**“Which of my reports are still in triage?”**
 
-| Feature | What you can do |
-| --- | --- |
-| **Programs** | Find programs and bounty ranges. Check activity and compare scope or rules across versions. |
-| **Inbox** | Get report status by title or ID. List reports or count them by state, including Pending, Triage and Draft. |
-| **Drafts** | Turn notes into a draft, add evidence to an existing one, and verify what was saved. |
-| **Payouts** | Check personal payout amounts, currencies, dates and payment status. |
+Ask Codex about your Intigriti inbox, or hand it your notes and evidence to prepare your next report. You review the draft, approve the files, and decide when to submit.
 
-## Connect to Codex
+| Feature | Try asking Codex | What you get |
+| --- | --- | --- |
+| **Programs** | “Show me five open bounty programs.” | Bounty ranges, scope summaries, rules and recent changes. |
+| **Inbox** | “How many reports are pending or in triage?” | Counts by status, or a single report’s status by title or ID. |
+| **Drafts** | “Add this screenshot to my draft.” | A review of the destination and files, then a check of what was saved. |
+| **Payouts** | “Which payouts are still pending?” | Amounts, currencies, dates and payment status. |
+
+## Quick start
 
 1. Choose **Code → Download ZIP** on GitHub. Extract it and open the folder containing this README as a trusted project in Codex.
 2. Ask Codex: **“Set up this Intigriti tool for me.”** With [Node.js 22 or newer](https://nodejs.org/en/download) and npm installed, the setup commands are:
@@ -21,16 +23,23 @@ Ask Codex about your Intigriti bug bounty work in plain language. **You approve 
    npm run setup:codex
    ```
 
-3. Sign in to Intigriti in your browser. Start a new chat in the same project and ask **“How many of my reports are pending or in triage?”**
+3. Sign in to Intigriti in your browser. Start a new Codex chat in the same project and try the inbox question above.
 
-**Inbox and drafts** use Codex’s connected Chrome or Computer control. Inbox checks stay on the list. Counts come from portal filters. Submission dates and comment previews are available only when the list labels them. For a draft, provide the program or draft link, review the text and files, then approve saving.
+For programs and payouts, add a [researcher token](https://app.intigriti.com/researcher/personal-access-tokens) as `INTIGRITI_API_TOKEN` in the local `.env` after setup, then restart the connector. Rerunning setup secures the file and preserves your token.
 
-**Programs and payouts** use a researcher token. Save it as `INTIGRITI_API_TOKEN` in the project’s local `.env` file and start a new chat. [Create a token](https://app.intigriti.com/researcher/personal-access-tokens)
+## What you approve
 
-Draft snapshots are stored in plain text under `~/.intigriti-researcher-mcp/drafts`. Information used to answer your request enters the chat.
+- **Inbox reads.** Codex reads the signed-in list through Chrome or Computer. Compare the proposed values with the list before confirming them. Title searches and status lists omit report links. Dates and comment previews appear only when the list labels them.
+- **Draft edits and uploads.** Review the program or draft link, text and files in the Codex form. The picker uses private, read-only copies. Codex reopens the draft to check the saved fields and filenames. Only you submit.
+- **Payouts.** Each page of personal earnings requires a separate confirmation before Codex reads it.
 
-## Testing
+Draft text is stored locally under `~/.intigriti-researcher-mcp/drafts` in plain text. Data used in an answer enters the chat. Interrupted picker copies expire and are cleaned up during a later attachment handoff. Hosts without confirmation forms support local previews and program browsing.
 
-Run `npm test` and `npm run test:draft` for offline checks. Live Windows tests used fresh Codex chats to check inbox statuses and reopen drafts to verify synthetic attachments.
+<details>
+<summary>Developer checks</summary>
 
-[All nine tools, limitations and future improvements](https://github.com/bunny0417/intigriti-researcher-mcp/blob/v1.2.0/README.md#available-tools) · [Release notes](https://github.com/bunny0417/intigriti-researcher-mcp/releases/tag/v1.2.0) · [MIT license](LICENSE)
+Run `npm test` for regressions, `npm run test:draft` for ten synthetic handoffs, and `npm run test:package` for five clean installs. With the Codex CLI installed, `node scripts/codex-host-smoke.js` exercises all nine tools in five fresh sessions. For live API checks, run `npm run test:live`. Add `-- --payouts` to approve real payout reads interactively.
+
+</details>
+
+[Release notes](https://github.com/bunny0417/intigriti-researcher-mcp/releases) · [MIT license](LICENSE)

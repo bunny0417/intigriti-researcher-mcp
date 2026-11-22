@@ -144,7 +144,7 @@ export function verifyInboxStatusFilter(requestedStatus, selectedStatuses, filte
   return { status, allowedRowStatuses };
 }
 
-export function getInboxCounts(input = {}) {
+export function previewInboxCounts(input = {}) {
   const parsed = argsSchema.safeParse(input);
   if (!parsed.success) throw new InboxCountError("Check the count request. Use one applied Status filter per reading with its checked labels, Programs: All, an empty search and no other filters.");
   const { statuses, countsObservation: observed } = parsed.data;
@@ -198,7 +198,7 @@ export function getInboxCounts(input = {}) {
   }
   return {
     status: unavailableStatuses.length || unobservedStatuses.length ? "counts_partial" : "counts_read",
-    source: "browser_observation", inboxUrl, totalReports: before.total,
+    inboxUrl, totalReports: before.total,
     counts, groups, unobservedStatuses, unavailableStatuses,
   };
 }

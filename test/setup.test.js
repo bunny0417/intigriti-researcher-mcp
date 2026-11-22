@@ -14,6 +14,8 @@ async function fixture(t) {
   const scripts = path.join(root, "scripts");
   const setup = path.join(scripts, "setup-codex.js");
   await mkdir(scripts);
+  await mkdir(path.join(root, "src"));
+  await copyFile(new URL("../src/private-permissions.js", import.meta.url), path.join(root, "src/private-permissions.js"));
   await copyFile(new URL("../scripts/setup-codex.js", import.meta.url), setup);
   await writeFile(path.join(root, "package.json"), '{"type":"module"}');
   const directory = path.join(root, ".codex");

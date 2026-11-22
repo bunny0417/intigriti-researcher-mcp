@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { protectPrivatePath } from "../src/private-permissions.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const directory = path.join(root, ".codex");
@@ -22,6 +23,9 @@ async function setup() {
   } catch (error) {
     if (error.code !== "EEXIST" && error.code !== "EISDIR") throw error;
     if (!(await stat(envFile)).isFile()) throw new Error(`${envFile} must be a regular file.`);
+  }
+  try { protectPrivatePath(envFile); } catch {
+    throw new Error("Could not secure .env. Use a regular file owned by your account and allow setup to restrict its permissions.");
   }
   await mkdir(directory, { recursive: true });
   // Publish a complete file in one step. A simultaneous setup or an existing

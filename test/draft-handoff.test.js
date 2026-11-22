@@ -31,11 +31,12 @@ test("first response requires a user decision and shows the destination, full fi
   assert.deepEqual(review.evidence, draft.attachments);
   assert.equal(review.nextAction, "ask_for_approval");
   assert.match(review.question, /1 reviewed file/);
-  assert.deepEqual(review.afterApproval, { mode: "approve", draftId: id, approvalId: review.approvalId });
-  assert.deepEqual(review.onDecline, { mode: "cancel", draftId: id });
+  assert.deepEqual(review.requestConfirmation, { mode: "approve", draftId: id, approvalId: review.approvalId });
+  assert.match(review.onDecline.cancelId, /^[\w-]{43}$/);
+  assert.equal(review.onDecline.draftId, id);
   assert.ok(Object.keys(review).indexOf("question") < Object.keys(review).indexOf("review"));
   assert.match(review.instructions.join(" "), /path/i);
-  assert.match(review.instructions.join(" "), /Wait for the response/);
+  assert.match(review.instructions.join(" "), /native user confirmation/);
   assert.deepEqual(review.missingFields, draft.missingFields);
   assert.equal(manager.start(draft).approvalId, review.approvalId);
   assert.ok(!Object.hasOwn(manager.status(id), "approvalId"));
@@ -58,7 +59,7 @@ test("only the correct session and snapshot can consume the one-time challenge",
   const handoff = manager.approve(draft, review.approvalId);
   assert.equal(handoff.status, "ready_for_browser");
   assert.deepEqual(handoff.hostTools, ["@Chrome", "@Computer"]);
-  assert.deepEqual(handoff.attachments, draft.attachments);
+  assert.deepEqual(handoff.attachments, [{ name: "fixture.png", size: 16 }]);
   assert.ok(!Object.hasOwn(handoff, "approvalId"));
   const instructions = handoff.instructions.join(" ");
   assert.equal(handoff.nextAction, "open_in_browser");
@@ -125,11 +126,13 @@ test("unanswered, expired and cancelled approvals never authorize a receipt", ()
   assert.throws(() => manager.approve(draft, old.approvalId), NativeHandoffError);
   const renewed = manager.start(draft);
   assert.notEqual(old.approvalId, renewed.approvalId);
-  assert.equal(manager.cancel(id).status, "cancelled");
+  assert.throws(() => manager.cancel(id, old.onDecline.cancelId), NativeHandoffError);
+  assert.equal(manager.cancel(id, renewed.onDecline.cancelId).status, "cancelled");
   assert.throws(() => manager.approve(draft, renewed.approvalId), NativeHandoffError);
   const last = manager.start(draft);
-  manager.approve(draft, last.approvalId);
-  assert.equal(manager.cancel(id).status, "cancelled");
+  const approved = manager.approve(draft, last.approvalId);
+  assert.throws(() => manager.cancel(id, last.onDecline.cancelId), NativeHandoffError);
+  assert.equal(manager.cancel(id, approved.onDecline.cancelId).status, "cancelled");
   assert.throws(() => manager.finish(bound, complete), NativeHandoffError);
   clock += 501;
   assert.equal(manager.status(id).status, "not_found");
@@ -280,7 +283,7 @@ test("cancellation revokes checkpoint and stale receipt even after the same snap
   assert.match(first.handoffId, /^[A-Za-z0-9_-]{43}$/);
   assert.ok(!Object.hasOwn(manager.status(id), "handoffId"));
   observeBound(manager, bound, first.handoffId);
-  manager.cancel(id);
+  manager.cancel(id, first.onDecline.cancelId);
   assert.throws(() => manager.checkpoint(bound, first.handoffId), NativeHandoffError);
   const second = manager.approve(bound, manager.start(bound).approvalId);
   assert.notEqual(second.handoffId, first.handoffId);
@@ -331,7 +334,7 @@ test("pre-Create check is limited to the active unbound source program and never
   assert.throws(() => manager.checkpoint(bound, attempt, { programUrl }), NativeHandoffError);
   const another = createNativeDraftHandoff();
   const cancelled = another.approve(draft, another.start(draft).approvalId).handoffId;
-  another.cancel(id);
+  another.cancel(id, another.status(id).onDecline.cancelId);
   assert.throws(() => another.checkpoint(draft, cancelled, { programUrl }), NativeHandoffError);
 });
 

@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { createNativeDraftHandoff, NativeHandoffError, nativeReceiptSchema, publicHandoffRecord } from "./draft-handoff.js";
 import { canonicalReportLinks, privateStore, publishJson, readJson } from "./report-draft.js";
+import { discardPickerAttempt } from "./picker-files.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
@@ -15,7 +16,7 @@ const receipt = nativeReceiptSchema.extend({
 });
 const recordSchema = z.strictObject({
   status: z.enum(["awaiting_approval", "ready_for_browser", "evidence_changed", "expired", "cancelled", "browser_reported_partial", "browser_reported_saved"]),
-  digest, direct: link, sourceProgramUrl: link, observedProgramUrl: link, pinnedUrl: link,
+  digest, cancelId: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(), direct: link, sourceProgramUrl: link, observedProgramUrl: link, pinnedUrl: link,
   checked: z.boolean(), observed: z.boolean().optional(), expiresAt: z.int(), forgetAt: z.int(),
   receipt: receipt.optional(), priorReceipt: receipt.optional(),
 });
@@ -124,6 +125,9 @@ export function createHandoffJournal() {
         token: next.token, attempt: next.attempt, until: next.token ? next.expiresAt : next.forgetAt,
       });
       else secrets.delete(id);
+      if (last.attemptHash && next?.status !== "ready_for_browser" && last.record?.status === "ready_for_browser") {
+        await discardPickerAttempt(draft, last.attemptHash);
+      }
       if (failure) throw failure;
       return output;
     }

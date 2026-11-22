@@ -26,7 +26,11 @@ test("same-tick review replacement invalidates the previous session across indep
   const otherSession = await a(d, "start", m => m.start(d));
   assert.equal(otherSession.status, "ready_for_browser");
   assert.ok(!otherSession.handoffId);
-  assert.equal((await a(d, "cancel", m => m.cancel(d.draftId))).status, "cancelled");
+  for (const stale of [undefined, first.onDecline.cancelId, replacement.onDecline.cancelId]) {
+    await assert.rejects(a(d, "cancel", m => m.cancel(d.draftId, stale)), /does not match/);
+  }
+  assert.equal((await b(d, "status", m => m.status(d.draftId))).status, "ready_for_browser");
+  assert.equal((await a(d, "cancel", m => m.cancel(d.draftId, otherSession.onDecline.cancelId))).status, "cancelled");
   await assert.rejects(b(d, "check", m => m.checkpoint(d, grant.handoffId, { draftUrl: url })));
   assert.equal((await b(d, "status", m => m.status(d.draftId))).status, "cancelled");
   const dir = path.join(path.dirname(d.draftPath), d.draftId + ".handoff");

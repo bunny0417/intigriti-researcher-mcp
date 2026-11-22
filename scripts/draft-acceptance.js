@@ -98,7 +98,7 @@ async function testHostHandoff(invoke, draft, firstApproval, round, withPeer) {
   const { draftId } = draft;
   const review = unpack(await invoke({ draftId }));
   checkReview(review, draft);
-  const approve = review.afterApproval;
+  const approve = review.requestConfirmation;
   assert.deepEqual(approve, { mode: "approve", draftId, approvalId: review.approvalId });
   const receipt = {
     ...(draft.programUrl ? { programUrl: draft.programUrl } : {}), draftUrl,
@@ -113,12 +113,12 @@ async function testHostHandoff(invoke, draft, firstApproval, round, withPeer) {
   await reject(invoke, { ...approve, approvalId: "x".repeat(43) });
   if (firstApproval) await reject(invoke, { ...approve, approvalId: firstApproval });
   await reject(invoke, { mode: "finish", draftId, receipt, handoffId: wrongId });
-  // Represents the researcher's explicit reply in this synthetic client only.
+  // The fixture host independently answers the elicitation request.
   let handoff = unpack(await invoke(approve));
   assert.equal(handoff.status, "ready_for_browser");
   assert.deepEqual(handoff.hostTools, ["@Chrome", "@Computer"]);
   assert.deepEqual(handoff.fields, draft.fields);
-  assert.deepEqual(handoff.attachments, draft.attachments);
+  assert.deepEqual(handoff.attachments, draft.attachments.map(({ name, size }) => ({ name, size })));
   assert.match(handoff.handoffId, /^[A-Za-z0-9_-]{43}$/);
   assert.notEqual(handoff.handoffId, review.approvalId);
   assert.match(handoff.instructions[0], /@Chrome[\s\S]*@Computer/);
@@ -145,6 +145,12 @@ async function testHostHandoff(invoke, draft, firstApproval, round, withPeer) {
   }
   const observed = { draftUrl, ...(draft.programUrl && { programUrl }) };
   const checked = unpack(await invoke({ ...check, ...observed }));
+  assert.equal(checked.pickerFiles.length, draft.attachments.length);
+  for (const [index, staged] of checked.pickerFiles.entries()) {
+    assert.notEqual(staged.path, draft.attachments[index].path);
+    assert.equal(staged.name, draft.attachments[index].name);
+    assert.deepEqual(await readFile(staged.path), await readFile(draft.attachments[index].path));
+  }
   assert.equal(checked.status, "handoff_checked");
   assert.equal(checked.nextAction, "fill_and_verify_draft");
   assert.deepEqual(checked.checkBeforeEditOrUpload, check);
@@ -162,7 +168,8 @@ async function testHostHandoff(invoke, draft, firstApproval, round, withPeer) {
       assert.equal(visible.status, "ready_for_browser");
       assert.ok(!Object.hasOwn(visible, "handoffId"));
       await reject(peer, check);
-      assert.equal(unpack(await peer({ mode: "cancel", draftId })).status, "cancelled");
+      await reject(peer, review.onDecline);
+      assert.equal(unpack(await peer(visible.onDecline)).status, "cancelled");
     });
     await reject(invoke, check);
     await reject(invoke, finish);
@@ -288,10 +295,12 @@ async function runRound(round, root, guard) {
     await reject(call, { ...args, submit: true });
   });
   let prompts = 0;
-  const elicit = round === 6 ? async ({ params }) => {
+  const elicit = async ({ params }) => {
     prompts++;
-    return { action: "cancel" };
-  } : undefined;
+    assert.ok(params.message.includes(draft.fields.title));
+    assert.ok(params.message.includes(JSON.stringify(note)));
+    return { action: "accept", content: { confirmed: true } };
+  };
   const withPeer = run => withServer(profile, guard, run);
   const { outcome, finish, superseded } = await withServer(profile, guard, async invoke => {
     const call = args => invoke({ mode: "local", ...args });
@@ -303,7 +312,7 @@ async function runRound(round, root, guard) {
     assert.deepEqual(await readFile(image), samplePng);
     return completed;
   }, elicit);
-  if (elicit) assert.equal(prompts, 0, "Advertised forms must not replace the researcher's explicit chat approval");
+  assert.equal(prompts, round === 3 ? 2 : 1, "Every new consent must have one host confirmation");
   // A new server can read the durable outcome, including pending items even
   // when a selected file was deleted. It cannot reuse that attempt for edits.
   await withPeer(async peer => {

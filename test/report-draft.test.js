@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { bindReportDraft, prepareReportDraft, readDraftForReceipt, ReportDraftError } from "../src/report-draft.js";
+import { discardPickerFiles, stagePickerFiles } from "../src/picker-files.js";
 
 const programUrl = "https://app.intigriti.com/programs/example/demo/detail";
 const draftUrl = "https://app.intigriti.com/researcher/inbox/submissions/draft/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002/create";
@@ -108,6 +109,95 @@ test("legacy evidence without a digest resumes only while all original metadata 
   await chmod(evidence, 0o444);
   await chmod(evidence, 0o600);
   await assert.rejects(prepare({ draftId: saved.draftId }), /attachment changed/i);
+});
+
+test("browser picker receives private read-only copies of the exact reviewed bytes", async t => {
+  const { root, prepare } = await fixture(t);
+  const file = path.join(root, "source proof.txt");
+  const token = "a".repeat(43);
+  const bytes = "reviewed bytes";
+  await writeFile(file, bytes);
+  const draft = await prepare({ ...note, attachments: [file] });
+  const [first, second] = await Promise.all([stagePickerFiles(draft, token), stagePickerFiles(draft, token)]);
+  assert.deepEqual(first, second);
+  const staged = first[0];
+  assert.equal(staged.name, path.basename(file));
+  assert.equal(path.basename(staged.path), staged.name);
+  assert.notEqual(staged.path, file);
+  assert.ok(!staged.path.includes(token));
+  assert.equal((await lstat(staged.path)).mode & 0o222, 0);
+  // Change the actual source in the window before the picker reads its path.
+  await writeFile(file, "unseen content");
+  assert.equal(await readFile(staged.path, "utf8"), bytes);
+  await discardPickerFiles(draft, token);
+  await discardPickerFiles(draft, token);
+  await assert.rejects(lstat(staged.path), { code: "ENOENT" });
+  assert.equal(await readFile(file, "utf8"), "unseen content");
+});
+
+test("staging rejects source changes before copying and cleans up partial output", async t => {
+  const { root, directory, prepare, forReceipt } = await fixture(t);
+  const files = [path.join(root, "one"), path.join(root, "two")];
+  for (const file of files) await writeFile(file, "old");
+  const draft = await prepare({ ...note, attachments: files });
+  await writeFile(files[1], "new");
+  await assert.rejects(stagePickerFiles(draft, "b".repeat(43)), { code: "evidence_invalid" });
+  assert.deepEqual(await readdir(directory), [path.basename(draft.draftPath)]);
+  await assert.rejects(stagePickerFiles(await forReceipt(draft.draftId), "b".repeat(43)), { code: "evidence_invalid" });
+});
+
+test("staged copies are attempt-scoped and altered copies fail closed", async t => {
+  const { root, prepare } = await fixture(t);
+  const file = path.join(root, "evidence");
+  await writeFile(file, "selected");
+  const draft = await prepare({ ...note, attachments: [file] });
+  const [one] = await stagePickerFiles(draft, "c".repeat(43));
+  const [two] = await stagePickerFiles(draft, "d".repeat(43));
+  assert.notEqual(one.path, two.path);
+  await chmod(one.path, 0o600);
+  await writeFile(one.path, "modified");
+  await chmod(one.path, 0o400);
+  await assert.rejects(stagePickerFiles(draft, "c".repeat(43)), { code: "evidence_invalid" });
+  await assert.rejects(lstat(one.path), { code: "ENOENT" });
+  assert.equal(await readFile(two.path, "utf8"), "selected");
+  await discardPickerFiles(draft, "d".repeat(43));
+});
+
+test("a legacy snapshot can stage after validation and abandoned copies expire", async t => {
+  const { root, prepare } = await fixture(t);
+  const file = path.join(root, "legacy evidence");
+  await writeFile(file, "legacy bytes");
+  const draft = await prepare({ ...note, attachments: [file] });
+  const old = JSON.parse(await readFile(draft.draftPath, "utf8"));
+  delete old.attachments[0].sha256;
+  await writeFile(draft.draftPath, JSON.stringify(old));
+  const restored = await prepare({ draftId: draft.draftId });
+  const [abandoned] = await stagePickerFiles(restored, "e".repeat(43));
+  const expired = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  await utimes(path.dirname(abandoned.path), expired, expired);
+  const [fresh] = await stagePickerFiles(restored, "f".repeat(43));
+  await assert.rejects(lstat(abandoned.path), { code: "ENOENT" });
+  assert.equal(await readFile(fresh.path, "utf8"), "legacy bytes");
+  await discardPickerFiles(restored, "f".repeat(43));
+});
+
+test("stage and cleanup reject reparented pickers without touching the link target", async t => {
+  const { root, prepare } = await fixture(t);
+  const evidence = path.join(root, "fixture.txt");
+  await writeFile(evidence, "reviewed");
+  const draft = await prepare({ ...note, attachments: [evidence] });
+  const token = "g".repeat(43);
+  const [picker] = await stagePickerFiles(draft, token);
+  const dir = path.dirname(picker.path);
+  await discardPickerFiles(draft, token);
+  const outside = path.join(root, "outside");
+  await mkdir(outside);
+  const unrelated = path.join(outside, path.basename(evidence));
+  await writeFile(unrelated, "unrelated");
+  await symlink(outside, dir, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(stagePickerFiles(draft, token), { code: "evidence_invalid" });
+  await assert.rejects(discardPickerFiles(draft, token), /junction|symbolic link/);
+  assert.equal(await readFile(unrelated, "utf8"), "unrelated");
 });
 
 test("program URL variants from the read tools normalize to one detail URL and resume by UUID", async t => {

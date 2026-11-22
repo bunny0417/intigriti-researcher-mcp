@@ -8,18 +8,19 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
-async function fixture(t) {
+async function fixture(t, response = () => ({ action: "accept", content: { confirmed: true } })) {
   const home = await realpath(await mkdtemp(path.join(tmpdir(), "draft-confirm-")));
   const file = path.join(home, "evidence.txt");
   await writeFile(file, "Example evidence");
-  let prompts = 0;
+  const prompts = [];
   const clients = [];
-  async function connect() {
-    const client = new Client({ name: "form-fixture", version: "1" }, { capabilities: { elicitation: { form: {} } } });
+  async function connect(hasForms = true) {
+    const client = new Client({ name: "form-fixture", version: "1" },
+      { capabilities: hasForms ? { elicitation: { form: {} } } : {} });
     clients.push(client);
-    client.setRequestHandler(ElicitRequestSchema, async () => {
-      prompts++;
-      return { action: "cancel" };
+    if (hasForms) client.setRequestHandler(ElicitRequestSchema, async ({ params }) => {
+      prompts.push(params);
+      return response(params, file);
     });
     const transport = new StdioClientTransport({ command: process.execPath,
       args: [fileURLToPath(new URL("../src/index.js", import.meta.url))],
@@ -31,7 +32,7 @@ async function fixture(t) {
     await Promise.all(clients.map(client => client.close()));
     await rm(home, { recursive: true, force: true });
   });
-  return { file, call: await connect(), connect, promptCount: () => prompts };
+  return { file, call: await connect(), connect, prompts };
 }
 
 test("a researcher can identify one file by name in Downloads", async t => {
@@ -52,20 +53,80 @@ test("a researcher can identify one file by name in Downloads", async t => {
   }
 });
 
-test("chat approval works when the client advertises forms but silently cancels them", async t => {
-  const { file, call, promptCount } = await fixture(t);
+test("draft grants require native confirmation of the exact reviewed destination, fields and evidence", async t => {
+  const { file, call, prompts } = await fixture(t);
   const input = { programUrl: "https://app.intigriti.com/programs/example/demo/detail",
     title: "Fixture title", description: "Example", attachments: [file] };
   const review = (await call(input)).structuredContent;
-  assert.ok(review.instructions.join(" ").includes("fresh chat reply"));
+  assert.ok(review.instructions.join(" ").includes("native user confirmation"));
   assert.equal(review.evidence[0].path, file);
   assert.equal((await call({ mode: "approve", draftId: review.draftId, approvalId: "x".repeat(43) })).isError, true);
   const result = await call({ mode: "approve", draftId: review.draftId, approvalId: review.approvalId });
   assert.equal(result.structuredContent.status, "ready_for_browser");
-  assert.equal(promptCount(), 0);
+  assert.equal(prompts.length, 1);
+  assert.ok(prompts[0].message.includes(JSON.stringify(file)));
+  assert.ok(prompts[0].message.includes(input.programUrl));
+  assert.ok(prompts[0].message.includes(input.title));
+  assert.ok(prompts[0].message.includes(input.description));
+  assert.equal(prompts[0].requestedSchema.properties.confirmed.default, false);
   const { draftId, approvalId } = (await call(input)).structuredContent;
   await writeFile(file, "Replacement");
   assert.equal((await call({ mode: "approve", draftId, approvalId })).isError, true);
+});
+
+test("declined, cancelled, incomplete and unsupported forms cannot release a handoff", async t => {
+  const replies = [{ action: "decline" }, { action: "cancel" }, { action: "accept", content: { confirmed: false } },
+    { action: "accept", content: {} }, { action: "accept" }];
+  const { call, connect, prompts } = await fixture(t, () => replies.shift());
+  const input = { programUrl: "https://app.intigriti.com/programs/example/demo/detail", title: "Review", description: "Fixture" };
+  for (let n = 0; n < 5; n++) {
+    const { requestConfirmation, draftId } = (await call(input)).structuredContent;
+    const result = await call(requestConfirmation);
+    assert.ok(result.isError || result.structuredContent.status === "cancelled");
+    assert.ok(!result.structuredContent?.handoffId);
+    assert.notEqual((await call({ mode: "status", draftId })).structuredContent.status, "ready_for_browser");
+  }
+  const other = await connect(false);
+  const review = (await other(input)).structuredContent;
+  assert.match((await other(review.requestConfirmation)).content[0].text, /form support/i);
+  assert.equal((await other({ mode: "local", draftId: review.draftId })).structuredContent.status, "prepared_locally");
+  assert.equal(prompts.length, 5);
+});
+
+test("changing evidence while the user reviews the form invalidates the returned consent", async t => {
+  const { call, file } = await fixture(t, async (_params, target) => {
+    await writeFile(target, "Replaced while reviewing");
+    return { action: "accept", content: { confirmed: true } };
+  });
+  const review = (await call({ programUrl: "https://app.intigriti.com/programs/example/demo/detail",
+    title: "Fixture", description: "Notes", attachments: [file] })).structuredContent;
+  assert.equal((await call(review.requestConfirmation)).isError, true);
+  assert.equal((await call({ mode: "status", draftId: review.draftId })).structuredContent.status, "evidence_changed");
+});
+
+test("a delayed form response cannot grant or cancel a newer review from another chat", async t => {
+  const shown = Promise.withResolvers();
+  const answer = Promise.withResolvers();
+  const { call, connect } = await fixture(t, () => {
+    shown.resolve();
+    return answer.promise;
+  });
+  const peer = await connect();
+  const input = { programUrl: "https://app.intigriti.com/programs/example/demo/detail",
+    title: "Synthetic review", description: "Synthetic body." };
+  const old = (await call(input)).structuredContent;
+  const pending = call(old.requestConfirmation);
+  await shown.promise;
+  try {
+    assert.match((await call(old.requestConfirmation)).content[0].text, /already open/);
+    const newer = (await peer({ draftId: old.draftId })).structuredContent;
+    assert.notEqual(old.approvalId, newer.approvalId);
+    assert.equal((await call(old.onDecline)).isError, true);
+  } finally {
+    answer.resolve({ action: "accept", content: { confirmed: true } });
+  }
+  assert.equal((await pending).isError, true);
+  assert.equal((await peer({ mode: "status", draftId: old.draftId })).structuredContent.status, "awaiting_approval");
 });
 
 test("adding evidence to an existing draft needs no report body and checks the expected title", async t => {
@@ -101,7 +162,8 @@ test("status and decline distinguish a local-only preview from an unknown draft"
   }
   const pending = (await call({ draftId })).structuredContent;
   assert.equal(pending.status, "awaiting_approval");
-  assert.equal((await call({ mode: "cancel", draftId })).structuredContent.status, "cancelled");
+  assert.equal((await call({ mode: "cancel", draftId })).isError, true);
+  assert.equal((await call(pending.onDecline)).structuredContent.status, "cancelled");
   assert.equal((await call({ mode: "approve", draftId, approvalId: pending.approvalId })).isError, true);
 });
 
@@ -117,16 +179,16 @@ test("only a matching capability can revoke approval for changed evidence, even 
   const { draftId } = review;
   const status = async client => (await client({ mode: "status", draftId })).structuredContent.status;
   await fileUpdate("change B");
-  assert.equal((await call({ ...review.afterApproval, approvalId: "x".repeat(43) })).isError, true);
+  assert.equal((await call({ ...review.requestConfirmation, approvalId: "x".repeat(43) })).isError, true);
   assert.equal((await call({ draftId })).isError, true);
   assert.equal(await status(call), "awaiting_approval");
-  assert.match((await call(review.afterApproval)).content[0].text, /approval has ended/i);
+  assert.match((await call(review.requestConfirmation)).content[0].text, /approval has ended/i);
   await fileUpdate("review A");
   assert.equal(await status(call), "evidence_changed");
-  assert.equal((await call(review.afterApproval)).isError, true);
+  assert.equal((await call(review.requestConfirmation)).isError, true);
   const renewed = (await call({ draftId })).structuredContent;
   assert.notEqual(renewed.approvalId, review.approvalId);
-  const handoff = (await call(renewed.afterApproval)).structuredContent;
+  const handoff = (await call(renewed.requestConfirmation)).structuredContent;
   const checked = (await call({ ...handoff.checkArgs, draftUrl })).structuredContent;
   await fileUpdate("change B");
   assert.equal((await call({ ...checked.checkBeforeEditOrUpload, handoffId: "z".repeat(43) })).isError, true);

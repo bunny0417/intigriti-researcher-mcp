@@ -2,11 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createRequire } from "node:module";
 import { z } from "zod";
 import { createHandoffJournal } from "./handoff-journal.js";
-import { getInboxCounts, inboxCountShape, InboxCountError } from "./inbox-counts.js";
-import { lookupInboxReport, inboxLookupShape, InboxLookupError } from "./inbox-lookup.js";
+import { confirmWithHost, confirmationData, HostConfirmationError } from "./host-confirmation.js";
+import { previewInboxCounts, inboxCountShape, InboxCountError } from "./inbox-counts.js";
+import { previewInboxReport, inboxLookupShape, InboxLookupError } from "./inbox-lookup.js";
+import { reviewInboxResult } from "./inbox-review.js";
 import { ClientError } from "./client.js";
 import { bindReportDraft, prepareReportDraft, readDraftForReceipt, reportDraftShape, ReportDraftError } from "./report-draft.js";
 import { draftIntake, NativeHandoffError, nativeReceiptSchema } from "./draft-handoff.js";
+import { discardPickerFiles, stagePickerFiles } from "./picker-files.js";
 import {
   activityRecord, isVisible, payoutRecord, programCard, programDetail,
   rulesVersion, scopeVersion, ViewError,
@@ -60,12 +63,12 @@ export function createServer(client, allowedIds = new Set()) {
       description,
       inputSchema: z.strictObject(shape),
       annotations,
-    }, async args => {
+    }, async (args, extra) => {
       try {
-        const value = await run(args);
+        const value = await run(args, extra);
         return { structuredContent: value, content: [{ type: "text", text: JSON.stringify(value) }] };
       } catch (error) {
-        const expected = error instanceof ClientError || error instanceof ViewError || error instanceof ToolError || error instanceof ReportDraftError || error instanceof NativeHandoffError || error instanceof InboxCountError || error instanceof InboxLookupError;
+        const expected = error instanceof ClientError || error instanceof ViewError || error instanceof ToolError || error instanceof ReportDraftError || error instanceof NativeHandoffError || error instanceof InboxCountError || error instanceof InboxLookupError || error instanceof HostConfirmationError;
         const message = expected ? error.message : "The Intigriti tool could not complete the request.";
         return { isError: true, content: [{ type: "text", text: message }] };
       }
@@ -116,30 +119,74 @@ export function createServer(client, allowedIds = new Set()) {
     programId, versionId,
   }, args => readVersion(args.programId, args.versionId, "rulesOfEngagement", (id, v) => client.getRulesVersion(id, v), rulesVersion));
 
-  tool("list_payouts", "Read a page of your personal payout amounts, currencies, dates and statuses. Request this when reviewing earnings.", {
+  tool("list_payouts", "Request private payout data for an earnings question. Each page requires the researcher's confirmation in the host form.", {
     ...page, statusId: enumId.optional(), createdSince: since, paidSince: since,
-  }, async query => pageResult(await client.listPayouts(query), query, payoutRecord));
+  }, async (query, extra) => {
+    const approved = await confirmWithHost(server, {
+      title: "Share this page of earnings with the chat",
+      message: "Allow this chat to read your personal Intigriti payout IDs, amounts, currencies, statuses and dates? " +
+        "This approval covers one page with these filters: " + JSON.stringify(query),
+    }, extra);
+    if (!approved) throw new ToolError("Payout access was declined. No earnings were requested.");
+    return pageResult(await client.listPayouts(query), query, payoutRecord);
+  });
 
   tool("get_inbox_counts",
-    "Count reports in the signed-in Intigriti inbox list. Start with {} for every state, statuses [] for the total only, or selected labels such as Pending, Triage and Draft. Follow the browser instructions, then pass the observed counters back. Never open report details.",
-    inboxCountShape, getInboxCounts);
+    "Count reports on the signed-in inbox list. Start with {} for all states, statuses [] for the total, or labels such as Pending and Triage. Return the observed counters for the researcher to confirm in the host form. Keep report details closed.",
+    inboxCountShape, (args, extra) => reviewInboxResult(server, extra, args, previewInboxCounts(args)));
 
   tool("get_inbox_reports",
-    "Check a report by exact title or ID, or list reports with a particular status. Use the signed-in inbox list only. Return the number shown and allowed row metadata; dates and latest comment previews are available only when explicitly displayed on the list. Never open a report or its contents.",
-    inboxLookupShape, lookupInboxReport);
+    "Check a report by exact title or ID, or list a status. Use only the signed-in inbox list. Pass positions and permitted list metadata for the researcher's host confirmation. Keep report details closed. Omit row links and identifiers.",
+    inboxLookupShape, (args, extra) => reviewInboxResult(server, extra, args, previewInboxReport(args)));
 
   const transact = createHandoffJournal();
+  const confirmingDrafts = new Set();
+  async function confirmDraft(draft, approvalId, extra) {
+    const id = draft.draftId;
+    if (confirmingDrafts.has(id)) throw new ToolError("The confirmation form is already open for this draft.");
+    confirmingDrafts.add(id);
+    try {
+      const review = await transact(draft, "review", m => m.review(draft, approvalId));
+      const details = { program: review.programUrl, destination: review.draftUrl ?? review.unverifiedDraftUrl ?? review.destination,
+        expectedTitle: review.expectedTitle, fields: review.review.fields, files: review.evidence, missing: review.missingFields };
+      const confirmed = await confirmWithHost(server, {
+        title: "Approve these draft edits and listed files",
+        message: review.message + "\n" + review.question + confirmationData(details),
+      }, extra);
+      if (!confirmed) {
+        return transact(draft, "cancel", m => m.cancel(id, review.onDecline.cancelId));
+      }
+      // The prompt can stay open while a file changes, a review expires, or
+      // another chat replaces it. Recheck both evidence and the generation.
+      const current = await prepareReportDraft({ draftId: id });
+      return transact(current, "approve", m => m.approve(current, approvalId));
+    } finally {
+      confirmingDrafts.delete(id);
+    }
+  }
+
+  async function pickerCheckpoint(draft, handoffId) {
+    await transact(draft, "check", m => m.validateBound(draft, handoffId));
+    try {
+      const pickerFiles = await stagePickerFiles(draft, handoffId);
+      const checked = await transact(draft, "check", m => m.checkpoint(draft, handoffId));
+      return { ...checked, pickerFiles };
+    } catch (error) {
+      await discardPickerFiles(draft, handoffId);
+      throw error;
+    }
+  }
   const secretId = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
   tool("prepare_report_draft",
-    "Start with {} to ask for a program, or use the supplied link. For a named file in Downloads, pass Downloads/filename directly; the MCP resolves its location. To add files to an existing draft, send draftUrl, attachments, and optionally expectedTitle; omit all report fields. Show the review and wait for explicit chat approval. Use @Chrome or @Computer for approved portal work. Check before Create, edits and each upload. Finish after reopening the draft. Only the researcher submits.",
+    "Start with {} to ask for a program, or use the supplied link. For a named file in Downloads, pass Downloads/filename directly. For files only, send draftUrl, attachments and optionally expectedTitle. Show the review and use requestConfirmation to open the Codex confirmation form. Use @Chrome or @Computer after approval. Check before Create, edits and each upload. Use only the staged pickerFiles paths. Finish after reopening the draft. Only the researcher submits.",
     { ...reportDraftShape, mode: z.enum(["browser", "local", "approve", "check", "finish", "status", "cancel"]).default("browser"),
-      approvalId: secretId.optional(), handoffId: secretId.optional(), receipt: nativeReceiptSchema.optional(),
+      approvalId: secretId.optional(), cancelId: secretId.optional(), handoffId: secretId.optional(), receipt: nativeReceiptSchema.optional(),
       observedTitle: z.string().max(100).optional().describe("In check mode, copy the actual visible title of the existing draft when an expectedTitle was reviewed.") },
-    async ({ mode, approvalId, handoffId, receipt, observedTitle, ...args }) => {
+    async ({ mode, approvalId, cancelId, handoffId, receipt, observedTitle, ...args }, extra) => {
       if (observedTitle !== undefined && (mode !== "check" || !args.draftUrl)) {
         throw new ToolError("Use observedTitle with the observed draftUrl in check mode.");
       }
-      if ((approvalId !== undefined) !== (mode === "approve") ||
+      if ((cancelId !== undefined && mode !== "cancel") || (approvalId !== undefined) !== (mode === "approve") ||
           (receipt !== undefined) !== (mode === "finish") ||
           (handoffId !== undefined) !== (mode === "check" || mode === "finish")) {
         throw new ToolError("Use approvalId for approve, handoffId for check, and handoffId plus receipt for finish.");
@@ -166,18 +213,19 @@ export function createServer(client, allowedIds = new Set()) {
           throw error;
         }
         if (mode === "finish") return transact(manifest, mode, m => m.finish(manifest, receipt, handoffId), handoffId);
-        return transact(manifest, mode, m => m[mode](id));
+        return transact(manifest, mode, m => mode === "cancel" ? m.cancel(id, cancelId) : m.status(id));
       }
       try {
         const draft = await prepareReportDraft({ draftId: id });
         if (mode === "approve") {
-          return transact(draft, mode, m => m.approve(draft, approvalId));
+          return await confirmDraft(draft, approvalId, extra);
         }
         const observed = { programUrl: args.programUrl, draftUrl: args.draftUrl, observedTitle };
+        if (!args.draftUrl && !args.programUrl) return await pickerCheckpoint(draft, handoffId);
         const checkpoint = await transact(draft, "check", m => m.checkpoint(draft, handoffId, observed), handoffId);
         if (!args.draftUrl) return checkpoint;
         const bound = await bindReportDraft(id, { programUrl: args.programUrl, draftUrl: args.draftUrl });
-        return transact(bound, "check", m => m.checkpoint(bound, handoffId), handoffId);
+        return await pickerCheckpoint(bound, handoffId);
       } catch (error) {
         if (!(error instanceof ReportDraftError) || error.code !== "evidence_invalid") throw error;
         const manifest = await readDraftForReceipt(id);

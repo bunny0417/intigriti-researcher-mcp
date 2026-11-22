@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, rmdir, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, rm, rmdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { readSettings } from "../src/settings.js";
+import { protectPrivatePath } from "../src/private-permissions.js";
 
 async function settingsFile(t) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "intigriti-settings-"));
@@ -34,6 +35,21 @@ test("explicit settings work even when the project env file cannot be read", asy
   }), { token: "", allowedProgramIds: "" });
 });
 
+test("runtime refuses a broadly accessible token file until setup secures it", async t => {
+  const file = await settingsFile(t);
+  await writeFile(file, "INTIGRITI_API_TOKEN=fixture-only");
+  if (process.platform !== "win32") await chmod(file, 0o644);
+  assert.throws(() => readSettings(file, {}), /setup:codex/);
+  protectPrivatePath(file);
+  assert.equal(readSettings(file, {}).token, "fixture-only");
+  const alias = new URL("alias", file);
+  await link(file, alias);
+  try {
+    assert.throws(() => readSettings(file, {}), /setup:codex/);
+    assert.throws(() => protectPrivatePath(alias), /single-link/);
+  } finally { await rm(alias); }
+});
+
 test("reads only connector settings and honors each explicit environment override", async (t) => {
   const file = await settingsFile(t);
   await writeFile(file, [
@@ -41,6 +57,7 @@ test("reads only connector settings and honors each explicit environment overrid
     "INTIGRITI_ALLOWED_PROGRAM_IDS=first,second",
     "UNRELATED_SETTING=ignored",
   ].join("\n"));
+  protectPrivatePath(file);
   assert.deepEqual(readSettings(file, {}), {
     token: "file-token", allowedProgramIds: "first,second",
   });
